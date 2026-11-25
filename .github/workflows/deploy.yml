@@ -1,3 +1,4 @@
+```yaml
 name: Build and Deploy Pill by Pill
 
 on:
@@ -45,8 +46,13 @@ jobs:
                   mod._pack_clean(tree, pathlib.Path("/tmp/pill-by-pill-v6.2.zip"))
               except subprocess.CalledProcessError as e:
                   print("=== FAILED CMD ===", e.cmd)
-                  print("=== STDOUT ===\n", e.stdout)
                   print("=== STDERR ===\n", e.stderr)
+                  eq = tree / "pipeline" / "build_equipment_catalog.py"
+                  if eq.is_file():
+                      print("=== build_equipment_catalog.py ANCHORS ===")
+                      for i, line in enumerate(eq.read_text(encoding="utf-8").splitlines(), 1):
+                          if line.startswith(("def ", "CLASS", "EQUIPMENT", "LAB_KITS", "OEM")):
+                              print(f"{i}: {line}")
                   sys.exit(1)
           EOF
           unzip -q /tmp/pill-by-pill-v6.2.zip -d /tmp/build
