@@ -45,11 +45,21 @@ jobs:
               txt = txt.replace("EQUIPMENT_CATALOG", "EQUIPMENT_SEED")
               p_60g.write_text(txt, encoding="utf-8")
 
+          # Hotfix v6.0c KeyError on missing search_query for v6.0g items
+          p_60c = pathlib.Path("patches/2026-11-20_v6.0c_equipment_market_pricing_patch.py")
+          if p_60c.is_file():
+              txt = p_60c.read_text(encoding="utf-8")
+              txt = txt.replace('item["search_query"]', 'item.get("search_query", item.get("name", ""))')
+              p_60c.write_text(txt, encoding="utf-8")
+
           spec = importlib.util.spec_from_file_location("v52", "patches/2026-11-24_apply_v6.2_unified_release_v52.py")
           mod = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(mod)
           with tempfile.TemporaryDirectory() as td:
               tree = mod._unpack_clean(pathlib.Path("patches/2026-11-21_pill-by-pill-source_v6.0b.zip"), pathlib.Path(td) / "tree")
+              eq = tree / "pipeline" / "build_equipment_catalog.py"
+              if eq.is_file():
+                  eq.write_text(eq.read_text(encoding="utf-8").replace('item["search_query"]', 'item.get("search_query", item.get("name", ""))'), encoding="utf-8")
               try:
                   mod.integrate_v62(tree, pathlib.Path("patches"))
                   mod._pack_clean(tree, pathlib.Path("/tmp/pill-by-pill-v6.2.zip"))
