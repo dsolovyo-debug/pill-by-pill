@@ -35,6 +35,14 @@ jobs:
         run: |
           python3 - << 'EOF'
           import importlib.util, pathlib, subprocess, sys, tempfile
+
+          # Hotfix v6.0g anchor name (_marketplace_links -> _market_links)
+          p_60g = pathlib.Path("patches/2026-11-21_v6.0g_equipment_expansion_18_classes_patch.py")
+          if p_60g.is_file():
+              txt = p_60g.read_text(encoding="utf-8")
+              if "_marketplace_links" in txt:
+                  p_60g.write_text(txt.replace("_marketplace_links", "_market_links"), encoding="utf-8")
+
           spec = importlib.util.spec_from_file_location("v52", "patches/2026-11-24_apply_v6.2_unified_release_v52.py")
           mod = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(mod)
@@ -45,13 +53,8 @@ jobs:
                   mod._pack_clean(tree, pathlib.Path("/tmp/pill-by-pill-v6.2.zip"))
               except subprocess.CalledProcessError as e:
                   print("=== FAILED CMD ===", e.cmd)
+                  print("=== STDOUT ===\n", e.stdout)
                   print("=== STDERR ===\n", e.stderr)
-                  eq = tree / "pipeline" / "build_equipment_catalog.py"
-                  if eq.is_file():
-                      print("=== build_equipment_catalog.py ANCHORS ===")
-                      for i, line in enumerate(eq.read_text(encoding="utf-8").splitlines(), 1):
-                          if line.startswith(("def ", "CLASS", "EQUIPMENT", "LAB_KITS", "OEM")):
-                              print(f"{i}: {line}")
                   sys.exit(1)
           EOF
           unzip -q /tmp/pill-by-pill-v6.2.zip -d /tmp/build
