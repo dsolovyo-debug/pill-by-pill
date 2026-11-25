@@ -1,0 +1,50 @@
+name: Build and Deploy Pill by Pill
+
+on:
+  push:
+    branches: ["main"]
+  schedule:
+    - cron: "0 6 * * 1" # Weekly Monday 06:00 UTC refresh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Apply v6.2 Unified Release & Build Site
+        run: |
+          python3 patches/2026-11-24_apply_v6.2_unified_release_v52.py \
+            --source-zip patches/2026-11-21_pill-by-pill-source_v6.0b.zip \
+            --patches-dir patches \
+            --out-zip /tmp/pill-by-pill-v6.2.zip
+          unzip -q /tmp/pill-by-pill-v6.2.zip -d /tmp/build
+          touch /tmp/build/site/.nojekyll
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: /tmp/build/site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
