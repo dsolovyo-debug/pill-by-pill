@@ -80,6 +80,28 @@ jobs:
                   sys.exit(1)
           EOF
           unzip -q /tmp/pill-by-pill-v6.2.zip -d /tmp/build
+          python3 - << 'EOF'
+          import pathlib, re
+
+          site = pathlib.Path("/tmp/build/site")
+          base = "/pill-by-pill"
+
+          for p in site.rglob("*"):
+              if not p.is_file():
+                  continue
+              if p.suffix == ".html":
+                  txt = p.read_text(encoding="utf-8", errors="ignore")
+                  txt = re.sub(r'(href|src|action)=(["\'])/(?!(/|pill-by-pill/))', rf'\1=\2{base}/', txt)
+                  p.write_text(txt, encoding="utf-8")
+              elif p.suffix == ".js":
+                  txt = p.read_text(encoding="utf-8", errors="ignore")
+                  txt = re.sub(r'(fetch\(\s*|location\.href\s*=\s*|href\s*:\s*|url\s*:\s*)(["\'])/(?!(/|pill-by-pill/))', rf'\1\2{base}/', txt)
+                  p.write_text(txt, encoding="utf-8")
+              elif p.suffix == ".css":
+                  txt = p.read_text(encoding="utf-8", errors="ignore")
+                  txt = re.sub(r'url\((["\']?)/(?!(/|pill-by-pill/))', rf'url(\1{base}/', txt)
+                  p.write_text(txt, encoding="utf-8")
+          EOF
           touch /tmp/build/site/.nojekyll
 
       - name: Upload Pages Artifact
