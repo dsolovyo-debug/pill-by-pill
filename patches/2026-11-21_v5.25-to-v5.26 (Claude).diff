@@ -1,0 +1,828 @@
+diff -ruN src525/ARCHITECTURE.md src526/ARCHITECTURE.md
+--- src525/ARCHITECTURE.md	2026-11-20 13:59:20.000000000 -0500
++++ src526/ARCHITECTURE.md	2026-11-21 00:54:19.153446364 -0500
+@@ -1,4 +1,4 @@
+-# Pill by Pill v5.25: architecture
++# Pill by Pill v5.26: architecture
+ 
+ A static site (deployed by dropping the zip on Netlify) plus an optional FastAPI server that reads the same files.
+ 
+@@ -230,3 +230,21 @@
+   citation. In-depth pages add plain links to email, X, Facebook, LinkedIn, Reddit and WhatsApp; no network scripts are
+   loaded and nothing is sent until the reader clicks. New pages: #/privacy (no cookies, analytics or ads; what local
+   storage keeps) and #/share (one-line description, link code, share picture, feed).
++
++## v5.26: 60 origin stories, one start-page grid, retry on a dropped connection, no dead end on "How it's made"
++- `pipeline/origin_stories.json`: 27 stories drafted by Gemini (batches 5 and 6) were checked against their sources before going in (full text
++  from NCBI eutils `efetch` or Europe PMC, the abstract where the publisher withholds the text, NobelPrize.org); most were corrected and five
++  cited papers were about something else, so they were dropped. A story may carry its own `checked` date, which `build_catalogue.py` keeps.
++  Nothing is held back any more (cisplatin has a readable source; artemisinin's story is on artesunate's page).
++- Start page (`js/app.js` `start()`): the six roles in one `.lens-grid` under "How are you exploring today?" (Dmitry's Option 2); the switcher
++  reads "Reference →" / "← Explore". Cards use `--paper`, so they follow dark mode.
++- `data.getJSON` tries once more after 400 ms when `fetch` itself fails, and marks the error `network`; the router then shows
++  "Connection interrupted" with a Try again button. A missing file or bad JSON still shows "We couldn't find that page".
++- Simple "How it's made" page of a medicine without a discovery story: "What the records say" (oldest date by region and what it is, first US
++  generic, family from `family_trees.json`, WHO list), built in `explore.js` from fields the page already has. Gemini's
++  `build_drug_histories.py` / `fetch_drug_histories.py` were not taken: they copied the same dates into every drug file with new wording
++  (some of it wrong, e.g. generic counts "across N sponsors" used all sponsors) and added Europe PMC papers matched only by title words as sources.
++- `pipeline/run_all.sh`: the PubChem cross-check now runs before `fetch_extra_chembl.py` and is skipped only when `raw/pubchem.json` has the
++  `crosscheck` marker. Before, the top-up written by `fetch_extra_chembl.py` made a fresh build skip the cross-check entirely, and every page
++  said "Not found in PubChem by InChIKey".
++- `config/site.json`: Google Search Console verification token.
+Binary files src525/__pycache__/app.cpython-313.pyc and src526/__pycache__/app.cpython-313.pyc differ
+diff -ruN src525/app.py src526/app.py
+--- src525/app.py	2026-11-20 13:59:20.000000000 -0500
++++ src526/app.py	2026-11-21 00:54:19.148353532 -0500
+@@ -1,4 +1,4 @@
+-"""Pill by Pill v5.25: optional FastAPI server.
++"""Pill by Pill v5.26: optional FastAPI server.
+ 
+ The static site (the Netlify zip) is the product. This server exists for local work and for anyone who wants a JSON API.
+ It has no data of its own: it serves the same site folder and answers API calls by reading the same JSON files the
+@@ -25,7 +25,7 @@
+     "euonly": lambda f: bool(f & FLAGS["ema"]) and not (f & FLAGS["us"]),
+ }
+ 
+-app = FastAPI(title="Pill by Pill API", version="5.25")
++app = FastAPI(title="Pill by Pill API", version="5.26")
+ 
+ 
+ @lru_cache(maxsize=None)
+Binary files src525/pipeline/__pycache__/fetch_binding.cpython-313.pyc and src526/pipeline/__pycache__/fetch_binding.cpython-313.pyc differ
+Binary files src525/pipeline/__pycache__/fetch_binding_biologics.cpython-313.pyc and src526/pipeline/__pycache__/fetch_binding_biologics.cpython-313.pyc differ
+Binary files src525/pipeline/__pycache__/fetch_binding_covalent.cpython-313.pyc and src526/pipeline/__pycache__/fetch_binding_covalent.cpython-313.pyc differ
+Binary files src525/pipeline/__pycache__/fetch_who_eml.cpython-313.pyc and src526/pipeline/__pycache__/fetch_who_eml.cpython-313.pyc differ
+Binary files src525/pipeline/__pycache__/names.cpython-313.pyc and src526/pipeline/__pycache__/names.cpython-313.pyc differ
+Binary files src525/pipeline/__pycache__/read_pmda_list.cpython-313.pyc and src526/pipeline/__pycache__/read_pmda_list.cpython-313.pyc differ
+diff -ruN src525/pipeline/build_catalogue.py src526/pipeline/build_catalogue.py
+--- src525/pipeline/build_catalogue.py	2026-11-20 12:43:14.000000000 -0500
++++ src526/pipeline/build_catalogue.py	2026-11-21 00:51:57.791443505 -0500
+@@ -657,7 +657,7 @@
+         sys.exit(f"origin_stories.json: {o['medicine']} is not in the catalogue")
+     if not o["sources"] or not all(s["url"].startswith("https://") for s in o["sources"]):
+         sys.exit(f"origin_stories.json: {o['medicine']} needs https source links")
+-    e["origin"] = {"category": o["category"], "simple": o["simple"], "expert": o["expert"], "sources": o["sources"], "checked": _origin["checked"]}
++    e["origin"] = {"category": o["category"], "simple": o["simple"], "expert": o["expert"], "sources": o["sources"], "checked": o.get("checked", _origin["checked"])}
+ 
+ # ---------------------------------------------------------------- PubChem cross-check (optional file)
+ pubchem_file = RAW / "pubchem.json"
+diff -ruN src525/pipeline/crosscheck_pubchem.py src526/pipeline/crosscheck_pubchem.py
+--- src525/pipeline/crosscheck_pubchem.py	2026-11-20 12:25:36.000000000 -0500
++++ src526/pipeline/crosscheck_pubchem.py	2026-11-21 00:52:51.214079306 -0500
+@@ -27,7 +27,11 @@
+ 
+ 
+ def main():
+-    out = {"by_inchikey": {}, "by_name": {}}
++    # v5.26: keep what fetch_extra_chembl.py already added to the file, and mark a full run; before this, a fresh build found the
++    # file written by that top-up, so run_all.sh skipped the cross-check and every page said "Not found in PubChem by InChIKey"
++    old_file = RAW / "pubchem.json"
++    prev = json.loads(old_file.read_text()) if old_file.exists() else {}
++    out = {"by_inchikey": dict(prev.get("by_inchikey", {})), "by_name": {}, "checked_inchikeys": prev.get("checked_inchikeys", [])}
+     keys, names = [], []
+     for f in sorted((DATA / "drugs").glob("*.json")):
+         d = json.loads(f.read_text())
+@@ -52,6 +56,7 @@
+                                  "formula": p.get("MolecularFormula"), "weight": p.get("MolecularWeight")}
+         time.sleep(0.25)
+     print("name lookups", len(names), "matched", len(out["by_name"]))
++    out["crosscheck"] = time.strftime("%Y-%m-%d")
+     (RAW / "pubchem.json").write_text(json.dumps(out))
+ 
+ 
+diff -ruN src525/pipeline/origin_stories.json src526/pipeline/origin_stories.json
+--- src525/pipeline/origin_stories.json	2026-11-20 13:01:52.000000000 -0500
++++ src526/pipeline/origin_stories.json	2026-11-21 00:58:32.508162067 -0500
+@@ -1,5 +1,5 @@
+ {
+- "note": "Where single medicines come from: curated text, each statement taken from the source(s) listed with it. The first 9 were drafted by Gemini (v5.18 spec, 2026-11-18) and checked by Claude on 2026-11-19; 24 more were drafted by Gemini (v5.19, v5.21, v5.24 patches, 2026-11-20) and checked by Claude on 2026-11-20 against the full text in Europe PMC, or the abstract where only that could be read (marked '(abstract)'). Statements a source did not support were removed or reworded (see the project log). The sources describe the organism, the discovery or the chemistry, not any company's current factory process. build_catalogue.py attaches each story to the medicine named in 'medicine' and fails if that name is not in the catalogue.",
++ "note": "Where single medicines come from: curated text, each statement taken from the source(s) listed with it. The first 9 were drafted by Gemini (v5.18 spec, 2026-11-18) and checked by Claude on 2026-11-19; 24 more were drafted by Gemini (v5.19, v5.21, v5.24 patches, 2026-11-20) and checked by Claude on 2026-11-20 against the full text in Europe PMC, or the abstract where only that could be read (marked '(abstract)'). Statements a source did not support were removed or reworded (see the project log). The sources describe the organism, the discovery or the chemistry, not any company's current factory process. 27 more (batches 5 and 6) were drafted by Gemini (v5.26 patches, 2026-11-20) and checked by Claude on 2026-11-21 against the full text from NCBI (eutils efetch) or Europe PMC, the abstract where the publisher does not release the text, and NobelPrize.org; those stories carry their own 'checked' date. CISPLATIN and ARTEMISININ (via ARTESUNATE, the catalogue's page) are no longer held back. build_catalogue.py attaches each story to the medicine named in 'medicine' and fails if that name is not in the catalogue.",
+  "checked": "2026-11-20",
+  "stories": [
+   {
+@@ -449,10 +449,414 @@
+      "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC4748523/"
+     }
+    ]
++  },
++  {
++   "medicine": "CISPLATIN",
++   "category": "Made by chemical synthesis (platinum coordination compound)",
++   "simple": "Cisplatin is a small compound built around one platinum atom. The chemist Peyrone first made it in 1844, but scientists did not study it until the 1960s. In the 1960s Rosenberg and his colleagues at Michigan State University found that substances coming off platinum electrodes stopped E. coli bacteria from dividing, and cisplatin turned out to be the compound doing it. In 1978 it became the first platinum medicine for cancer approved by the FDA.",
++   "expert": "Cisplatin (cis-diamminedichloroplatinum(II)) is a square-planar platinum coordination compound, first synthesized by M. Peyrone in 1844; Alfred Werner elucidated its structure in 1893. It drew no scientific interest until Rosenberg, VanCamp and colleagues at Michigan State University (1965) reported that electrolysis products of platinum mesh electrodes inhibited cell division in Escherichia coli; cisplatin was identified as the active agent and became the first FDA-approved platinum compound for cancer treatment in 1978.",
++   "sources": [
++    {
++     "label": "Dasari and Tchounwou, Eur J Pharmacol 2014: cisplatin in cancer therapy, molecular mechanisms of action",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC4146684/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "ARTESUNATE",
++   "category": "Changed by chemists from a plant compound (semi-synthesis)",
++   "simple": "Artesunate is a malaria medicine made by chemists from artemisinin, a compound that the Chinese scientist Tu Youyou first isolated in 1972 from the plant Artemisia annua. Artemisinin itself does not dissolve well in water, so chemists changed it; artesunate is a version that dissolves in water.",
++   "expert": "Artesunate is a semi-synthetic, water-soluble derivative of artemisinin, a sesquiterpene lactone with a 1,2,4-trioxane ring that Tu Youyou first isolated by bioassay-guided fractionation from Artemisia annua L. (Asteraceae) in 1972. Artemisinin's thermal instability, poor solubility and production cost led to semi-synthetic derivatives.",
++   "sources": [
++    {
++     "label": "Xia et al., Int J Mol Sci 2025: artemisinin and its derivatives, from molecular mechanisms to clinical applications",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC12429344/"
++    },
++    {
++     "label": "Zhang et al., Front Pharmacol 2023: artesunate inhibits airway remodeling in asthma (background section)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10043319/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "IBUPROFEN",
++   "category": "Made by chemical synthesis",
++   "simple": "Ibuprofen was the first member of a family of pain medicines called propionic acid derivatives, introduced in 1969. Today it is a common medicine for pain and fever in adults and children, sold without a prescription.",
++   "expert": "Ibuprofen, introduced in 1969, was the first of the propionic acid derivatives among the NSAIDs; it is widely used over the counter as an analgesic and antipyretic for adults and children.",
++   "sources": [
++    {
++     "label": "Bushra and Aslam, Oman Med J 2010: an overview of clinical pharmacology of ibuprofen (abstract)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC3191627/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "ACETAMINOPHEN",
++   "category": "Made by chemical synthesis",
++   "simple": "Acetaminophen (paracetamol) was first made by the chemist Morse in 1878. Joseph von Mering gave it to people, but it was then set aside for a related pain medicine, phenacetin. Around 1948 and 1949, Brodie, Axelrod and Flinn showed that the body turns phenacetin into acetaminophen, and that acetaminophen is what actually relieves pain. Phenacetin was later dropped because it harmed the kidneys, and acetaminophen replaced it.",
++   "expert": "Acetaminophen (N-acetyl-p-aminophenol) was synthesized by Morse in 1878 and first given to humans by von Mering (the two reviews date this 1887 and 1893). It was discarded in favour of phenacetin until Flinn and Brodie (1948) and Brodie and Axelrod (1949) showed that it is the major and pharmacologically active metabolite of phenacetin. Phenacetin's nephrotoxicity led to its withdrawal, and acetaminophen entered the US market as its replacement.",
++   "sources": [
++    {
++     "label": "McGill and Hinson, Drug Metab Rev 2020: the development and hepatotoxicity of acetaminophen",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC8427730/"
++    },
++    {
++     "label": "Ghanem et al., Pharmacol Res 2016: acetaminophen from liver to brain",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC4912877/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "STREPTOMYCIN",
++   "category": "Made by a soil bacterium (fermentation)",
++   "simple": "Streptomycin comes from a soil bacterium called Streptomyces griseus (griseus means grey). In 1943 Albert Schatz, a student in Selman Waksman's laboratory at Rutgers University, isolated it while the lab was testing soil bacteria for germ-killing substances. In 1944 doctors at the Mayo Clinic showed that it worked against tuberculosis, and growing the bacteria submerged in liquid made it possible to produce enough for patients.",
++   "expert": "Streptomycin was isolated in 1943 from Streptomyces griseus by Albert Schatz, a PhD student in Selman Waksman's soil-bacteria screening programme at the New Jersey Agricultural Station of Rutgers University. William Feldman and Corwin Hinshaw at the Mayo Clinic showed its efficacy against Mycobacterium tuberculosis in 1944, and a submerged culture technique allowed large-scale production for animal testing and clinical trials. Waksman received the 1952 Nobel Prize; Schatz later sued and was legally recognised as a co-discoverer.",
++   "sources": [
++    {
++     "label": "Henry, Emerg Infect Dis 2019: Etymologia, streptomycin",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6390759/"
++    },
++    {
++     "label": "Woodruff, Appl Environ Microbiol 2014: Selman A. Waksman, winner of the 1952 Nobel Prize (abstract)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC3911012/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "DOXORUBICIN",
++   "category": "Made by a soil bacterium (fermentation)",
++   "simple": "Doxorubicin comes from a soil bacterium, Streptomyces peucetius, found near Castel del Monte in Apulia, Italy. From 1960 the company Farmitalia and the National Cancer Institute in Milan studied it together and found an earlier cancer medicine, daunorubicin. In 1968 they treated the bacterium with a chemical that changes its genes, and the changed strain made a new molecule, first called adriamycin and later doxorubicin.",
++   "expert": "From 1960 a Farmitalia and Istituto Nazionale dei Tumori (Milan) collaboration studied Streptomyces peucetius from near Castel del Monte (Apulia), yielding daunomycin (daunorubicin). In 1968 a new anthracycline was extracted from a mutant strain obtained with N-nitroso-N-methylurea: adriamycin, later renamed doxorubicin, developed with researchers at Memorial Sloan-Kettering. It had better activity in mouse tumours and a greater therapeutic index, but kept the cardiotoxicity typical of anthracyclines.",
++   "sources": [
++    {
++     "label": "Falzone, Salomone and Libra, Front Pharmacol 2018: evolution of cancer pharmacological treatments",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6243123/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "ACYCLOVIR",
++   "category": "Made by chemical synthesis (nucleoside analogue)",
++   "simple": "Acyclovir was the first medicine that really worked against herpes virus infections. Gertrude Elion and her coworkers described it in 1977. Inside an infected cell, an enzyme that the herpes virus itself makes switches the medicine on, so it acts in the infected cells. Elion and George Hitchings shared the 1988 Nobel Prize for the ideas behind medicines like this one.",
++   "expert": "Acyclovir, an acyclic nucleoside analogue, was discovered by Schaeffer and colleagues in 1974 in a search for adenosine deaminase inhibitors, described by Elion and coworkers in 1977, developed by Burroughs Wellcome against herpes viruses and first marketed in 1981. A virus-encoded enzyme activates it in infected cells. It came from Elion and Hitchings' approach of looking for differences in nucleic acid metabolism between normal human cells and viruses, recognised in the 1988 Nobel Prize in Physiology or Medicine (shared with James Black).",
++   "sources": [
++    {
++     "label": "NobelPrize.org: The Nobel Prize in Physiology or Medicine 1988, press release",
++     "url": "https://www.nobelprize.org/prizes/medicine/1988/press-release/"
++    },
++    {
++     "label": "Wei et al., Molecules 2021: critical review of synthesis, toxicology and detection of acyclovir",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC8587948/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "PROPRANOLOL",
++   "category": "Made by chemical synthesis (designed receptor blocker)",
++   "simple": "Adrenaline makes the heart pump harder and blood pressure rise. At the beginning of the 1960s James Black developed propranolol to calm the heart by blocking the receptor that adrenaline acts on. It was one of the first beta-blockers, and Black shared the 1988 Nobel Prize in Physiology or Medicine.",
++   "expert": "James Black and his coworkers developed the beta-receptor blockers pronethalol (1962) and propranolol (1964); clinical trials of propranolol showed that Black's idea of blocking the receptor for adrenaline was correct, and beta-receptor blocking drugs came into wide use for angina pectoris. Black shared the 1988 Nobel Prize in Physiology or Medicine with Gertrude Elion and George Hitchings.",
++   "sources": [
++    {
++     "label": "NobelPrize.org: Sir James W. Black, facts",
++     "url": "https://www.nobelprize.org/prizes/medicine/1988/black/facts/"
++    },
++    {
++     "label": "NobelPrize.org: The Nobel Prize in Physiology or Medicine 1988, press release",
++     "url": "https://www.nobelprize.org/prizes/medicine/1988/press-release/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "OMEPRAZOLE",
++   "category": "Made by chemical synthesis",
++   "simple": "Omeprazole lowers stomach acid by blocking the acid pump in the stomach lining. Chemists at Hässle (part of the company Astra) first had two test molecules, timoprazole and picoprazole, that blocked the pump directly but were later found to harm the thyroid gland and blood vessels. Adding small groups to one ring of picoprazole gave omeprazole, which went on sale in Europe in 1988.",
++   "expert": "Omeprazole is a substituted benzimidazole. In 1978 the benzimidazoles timoprazole and picoprazole were found to inhibit the H+/K+-ATPase of parietal cells directly, but further studies showed thyroid (timoprazole) and vascular (picoprazole) toxicity. Substituents added to picoprazole's pyridine ring, which raised its pKa, gave omeprazole, launched in Europe in 1988 and in the US two years later as Prilosec. Hässle's core antisecretory compound, pyridyl-2-acetamide, had come from Servier as an antiviral agent.",
++   "sources": [
++    {
++     "label": "Srebro, Brniak and Mendyk, Pharmaceutics 2022: formulation of dosage forms with proton pump inhibitors",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9612372/"
++    },
++    {
++     "label": "Letter, Clin Drug Investig 2021: an additional perspective on proton pump inhibitors as risk factors for COVID-19 (history of timoprazole)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7892720/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "FLUOXETINE",
++   "category": "Made by chemical synthesis",
++   "simple": "Fluoxetine (Prozac) was the first selective serotonin reuptake inhibitor (SSRI) approved by the US Food and Drug Administration. It was the first big step forward in treating depression since the older medicine families of nearly 30 years before.",
++   "expert": "Fluoxetine was the first SSRI approved by the FDA and the first major advance in the treatment of depression since the tricyclic antidepressants and monoamine oxidase inhibitors nearly 30 years earlier; the exact mechanism behind its clinical efficacy is still debated.",
++   "sources": [
++    {
++     "label": "Wenthur, Bennett and Lindsley, ACS Chem Neurosci 2014: Classics in Chemical Neuroscience, fluoxetine (Prozac) (abstract)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC3894728/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "ZIDOVUDINE",
++   "category": "Made by chemical synthesis (nucleoside analogue)",
++   "simple": "Zidovudine (AZT) was first made in the mid-1960s as a possible cancer medicine, but it failed as one and was set aside. About twenty years later, after HIV was discovered, scientists at the US National Cancer Institute and the company Burroughs-Wellcome found in 1985 that AZT stopped the virus in the laboratory. It was approved in the USA on March 19, 1987, less than two years later.",
++   "expert": "AZT (3'-azido-3'-deoxythymidine), a chain-terminating dideoxynucleoside, was synthesized as a potential anticancer agent under National Cancer Institute grants in the mid-1960s and failed in cancer-drug selection. Broder's NCI group, with Burroughs-Wellcome scientists, found it highly active against HIV-1 in vitro (communicated June 28, 1985); after the first clinical trial and a placebo-controlled trial showing a survival advantage, Retrovir was approved in the USA on March 19, 1987, the prototype of the nucleoside reverse transcriptase inhibitors.",
++   "sources": [
++    {
++     "label": "Broder, Antiviral Res 2010: the development of antiretroviral therapy and its impact on the HIV-1/AIDS pandemic",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC2815149/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "THALIDOMIDE",
++   "category": "Made by chemical synthesis",
++   "simple": "Thalidomide was first sold as a sedative and became popular with pregnant women because it eased morning sickness, until it was found to cause severe birth defects. The disaster led to new laws that changed how the US FDA reviews medicines. Decades later thalidomide came back as a treatment for some inflammatory diseases and cancers, and in 2006 it was approved for plasma cell myeloma.",
++   "expert": "Thalidomide was originally marketed as a sedative and widely used by pregnant women for its anti-emetic effect in morning sickness; evidence of human teratogenicity ended that use and stimulated legislation that revamped the FDA regulatory process, expanded informed consent and required more transparency from manufacturers. It re-emerged decades later for inflammatory and malignant diseases and in 2006 became the first new agent in over a decade approved for plasma cell myeloma; related drugs such as lenalidomide followed.",
++   "sources": [
++    {
++     "label": "Rehman, Arfons and Lazarus, Ther Adv Hematol 2011: the rise, fall and subsequent triumph of thalidomide (abstract)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC3573415/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "PEMBROLIZUMAB",
++   "category": "Made by genetically engineered cells (humanized antibody)",
++   "simple": "Pembrolizumab is an antibody that blocks PD-1, a 'brake' on immune cells that was discovered in 1992. Cancer cells can press this brake to hide from the immune system; blocking it lets the immune cells attack the tumour again. The part that grabs PD-1 came from a mouse antibody and was placed into a human antibody frame. It was first approved by the FDA in 2014 for advanced melanoma.",
++   "expert": "Pembrolizumab (formerly MK-3475 and lambrolizumab) is a humanized IgG4 monoclonal antibody against PD-1, a receptor first discovered in 1992. It carries the variable region of a high-affinity mouse anti-human PD-1 antibody (KD 28 pM) grafted onto a human IgG4 with an S228P Fc mutation for stability, and was developed to restore the cytotoxic function of tumour-infiltrating lymphocytes. It received breakthrough status and was first approved by the FDA in 2014 for ipilimumab-refractory advanced melanoma.",
++   "sources": [
++    {
++     "label": "Burns, O'Donnell and Puzanov, Expert Opin Orphan Drugs 2016: pembrolizumab for the treatment of advanced melanoma",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5010088/"
++    },
++    {
++     "label": "Kwok et al., Hum Vaccin Immunother 2016: pembrolizumab (Keytruda) (abstract)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5137544/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "TRASTUZUMAB",
++   "category": "Made by genetically engineered cells (humanized antibody)",
++   "simple": "In 1987 Slamon and colleagues found that the HER2 gene is copied too many times in about 30% of breast tumours. In 1989 scientists made a mouse antibody, called 4D5, that sticks to the HER2 protein and slowed the growth of such cancer cells. In 1992 it was 'humanized' so that it could be tested in people. This became trastuzumab (Herceptin), approved in the USA in 1998 and in Europe in 2000.",
++   "expert": "After the rat neu oncogene (1984) and its human homologue HER2 (1985) were described, Slamon et al. (1987) found HER2 amplified in about 30% of breast tumours, correlating with poor prognosis. Hudziak et al. (1989) isolated the murine monoclonal antibody 4D5, antiproliferative against SKBR3 HER2-positive cells, and Carter et al. (1992) humanized it; as trastuzumab (Herceptin) it was approved in the USA in 1998 and in Europe in 2000.",
++   "sources": [
++    {
++     "label": "Maadi et al., Cancers (Basel) 2021: trastuzumab mechanism of action, 20 years of research",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC8303665/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "ADALIMUMAB",
++   "category": "Made by genetically engineered cells (human antibody found by phage display)",
++   "simple": "Adalimumab blocks TNF, an immune signal involved in diseases such as rheumatoid arthritis. In 1993 scientists at the companies BASF/Knoll and CAT started from a mouse antibody against TNF and used it as a guide to pick out human antibody parts that grab TNF in a similar way, with a laboratory method called phage display. A mouse antibody was not suitable for long-term treatment, so they wanted a human one. Adalimumab was the first human antibody, and the first antibody found by phage display, to be approved; the FDA approved it on December 31, 2002.",
++   "expert": "Adalimumab (D2E7) came from a 1993 collaboration between BASF Bioresearch/Knoll and CAT. The murine anti-TNF antibody MAK195 served as the template for guided selection by phage display: scFv libraries pairing MAK195's VH with human light chains and its VL with human heavy chains were panned on TNF, the selected human VH and VL were combined and reselected, and CDR mutagenesis gave D2E7. It became the first phage display-derived antibody and the first human antibody to be approved (FDA, December 31, 2002, rheumatoid arthritis).",
++   "sources": [
++    {
++     "label": "Frenzel, Schirrmann and Hust, MAbs 2016: phage display-derived human antibodies in clinical development and therapy",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5058633/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "RITUXIMAB",
++   "category": "Made by genetically engineered cells (chimeric antibody)",
++   "simple": "Rituximab is a chimeric antibody: the part that grabs the CD20 protein on B cells comes from a mouse antibody, and its tail is human, which lowers the chance that patients' immune systems react against the medicine. First tested in patients in 1994 under the name IDEC-C2B8, it was approved by the FDA in 1997 for follicular lymphoma, the first therapeutic antibody approved for cancer.",
++   "expert": "Rituximab (IDEC-C2B8) is a chimeric mouse/human anti-CD20 monoclonal antibody: murine variable regions on a human Fc region, a technology that reduced patients' immune responses against the antibody itself. After killing CD20-expressing cells in vitro and in macaques, it entered phase I trials (Maloney et al., 1994); a 1997 phase I/II trial was the basis for FDA approval as Rituxan for follicular lymphoma in 1997. It was the first therapeutic antibody approved for oncology patients.",
++   "sources": [
++    {
++     "label": "Pierpont, Limper and Richards, Front Oncol 2018: past, present and future of rituximab",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5994406/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "SOFOSBUVIR",
++   "category": "Made by chemical synthesis (nucleotide prodrug)",
++   "simple": "Sofosbuvir is a lab-made medicine for hepatitis C. The chemist Michael Sofia at the company Pharmasset is reported to have made it in 2007, as PSI-7977, and the medicine was named after him. In 2011 Pharmasset announced that all the patients in a trial had been cured. It was approved by the FDA on December 6, 2013, the first of a new class of medicines offering a potential cure for chronic hepatitis C.",
++   "expert": "Sofosbuvir (PSI-7977), a prodrug and a diastereomer of PSI-7851, is reported to have been synthesized by Michael Sofia at Pharmasset in 2007 and was named after him. Its development drew on publicly funded research, including HCV cell-culture systems for growing the virus in vitro. Pharmasset advanced PSI-7977 to phase II in 2010, announced in 2011 that all trial patients were cured, and was acquired by Gilead in January 2012 for US$11.2 billion; FDA approval followed on December 6, 2013, the first in a class of direct-acting antivirals offering a potential cure. Ralf Bartenschlager, Charles Rice and Michael Sofia received the 2016 Lasker~DeBakey Clinical Medical Research Award.",
++   "sources": [
++    {
++     "label": "Barenie et al., Drug Discov Today 2021: public funding for transformative drugs, the case of sofosbuvir",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7528745/"
++    },
++    {
++     "label": "Williams, J Clin Invest 2016: Bartenschlager, Rice and Sofia honored with the 2016 Lasker~DeBakey award (title)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5096798/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "IVACAFTOR",
++   "category": "Made by chemical synthesis (CFTR potentiator)",
++   "simple": "In cystic fibrosis, CFTR, a protein channel that lets chloride through the cell surface, is faulty. Ivacaftor, a pill, helps the channel stay open longer. When it was licensed in the USA and Europe in 2012 for patients with a mutation called G551D, it was the first treatment that acts on the underlying defect rather than its effects.",
++   "expert": "Ivacaftor (VX-770, Kalydeco) is an oral CFTR potentiator that increases the time activated CFTR channels at the cell surface remain open; candidate molecules of this kind are found by high-throughput screening of over 100,000 compounds for improved chloride transport in human bronchial CF cells. Licensed in 2012 in the United States and Europe for patients aged six and over with at least one Gly551Asp (G551D) allele, a gating mutation carried by about 4-5% of patients, it was the first treatment to address the underlying CFTR defect directly.",
++   "sources": [
++    {
++     "label": "O'Reilly and Elphick, Drug Des Devel Ther 2013: development, clinical utility and place of ivacaftor",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC3770629/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "BORTEZOMIB",
++   "category": "Made by chemical synthesis (dipeptide boronic acid)",
++   "simple": "Bortezomib blocks the proteasome, the cell's machine for breaking down proteins. It came from MyoGenetics, a company founded in 1993 by Alfred Goldberg, who discovered the proteasome, and led by the chemist Julian Adams; at first they wanted to treat muscle wasting. Tested against cancer from 1994 as MG-341 (later PS-341), it was approved by the FDA in 2003 for multiple myeloma, the first proteasome-blocking medicine.",
++   "expert": "Bortezomib, a dipeptide boronic acid (pyrazinoic acid, phenylalanine and leucine with a boronic acid), began as MG-341 at MyoGenetics, founded in 1993 by Alfred Goldberg to develop proteasome inhibitors for muscle wasting, with Julian Adams recruited to head it. MG-341 selectively inhibited the chymotryptic activity of the 20S proteasome; its anticancer activity was examined at Dana-Farber from 1994, the company became ProScript (MG-341 became PS-341), and Millennium acquired it in 1999. A stable formulation that released the boronic acid in water, made with the NCI's Developmental Therapeutics Program, enabled clinical trials; FDA approval for refractory multiple myeloma came in 2003, seven years after its first synthesis.",
++   "sources": [
++    {
++     "label": "Teicher and Anderson, Clin Cancer Res 2015: in the beginning, there was PS-341",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC4349205/"
++    },
++    {
++     "label": "Chen et al., Curr Cancer Drug Targets 2011: bortezomib as the first proteasome inhibitor anticancer drug",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC3306611/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "PATISIRAN SODIUM",
++   "category": "Made by chemical oligonucleotide synthesis, carried in lipid nanoparticles",
++   "simple": "Patisiran is a small interfering RNA (siRNA): two short, chemically changed RNA strands that stop the liver from making the protein transthyretin. Because the strands carry only a few chemical changes, they travel inside tiny fat droplets called lipid nanoparticles. The FDA approved it on August 10, 2018, the first siRNA medicine, about 20 years after RNA interference was discovered.",
++   "expert": "Patisiran (Onpattro; Alnylam Pharmaceuticals) is a double-stranded siRNA of two 21-base strands, with eleven 2'-O-methyl modifications on the sense-strand pyrimidines and two on antisense-strand uridines, that targets transthyretin (TTR) mRNA. Because of its limited chemical modification it is formulated in second-generation lipid nanoparticles (cholesterol, DSPC, PEG2000-C-DMG and the ionizable lipid DLin-MC3-DMA). Approved by the FDA on August 10, 2018, for polyneuropathy of hereditary transthyretin amyloidosis, it was the first siRNA drug.",
++   "sources": [
++    {
++     "label": "Zhang et al., Biochem Pharmacol 2021: the growth of siRNA-based therapeutics, updated clinical studies",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC8187268/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "NUSINERSEN",
++   "category": "Made by chemical oligonucleotide synthesis (antisense oligonucleotide)",
++   "simple": "Nusinersen is a short, chemically changed strand of genetic material (an antisense oligonucleotide) for spinal muscular atrophy. In this disease the SMN2 gene cannot make enough working SMN protein, because one piece of its message, exon 7, is usually cut out. Yimin Hua, working in Adrian Krainer's laboratory at Cold Spring Harbor Laboratory with the company ISIS Pharmaceuticals, tested many overlapping strands and found one that makes cells keep exon 7. It became nusinersen, approved by the FDA in December 2016 as the first effective treatment for SMA.",
++   "expert": "Nusinersen is a 2'-O-methoxyethyl-modified antisense oligonucleotide. In a systematic 'walk' of overlapping ASOs across SMN2 from intron 6 to exon 8, Yimin Hua (Krainer laboratory, Cold Spring Harbor Laboratory, with ISIS Pharmaceuticals, renamed Ionis in 2015) identified ASO 10-27, which targets the intronic splicing silencer ISS-N1, blocks binding of hnRNP A1/A2 and restores exon 7 inclusion (Hua et al., 2007, 2008). Renamed ISIS-SMNRx, it entered clinical trials in 2011 with support from ISIS and Biogen and was approved by the FDA in December 2016 as the first effective drug for SMA.",
++   "sources": [
++    {
++     "label": "Qiu et al., Front Cell Neurosci 2022: history of development of the life-saving drug nusinersen in spinal muscular atrophy",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9414009/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "LEVODOPA",
++   "category": "Found in plants (first isolated from bean seedlings)",
++   "simple": "Levodopa is found in plants: the seeds of the velvet bean (Mucuna pruriens) contain it, and ancient Indian Ayurvedic doctors used them for symptoms of Parkinson's disease. It was first isolated in 1913 by Marcus Guggenheim from bean seedlings. In the late 1950s Arvid Carlsson showed that rabbits made motionless by the drug reserpine became alert again when given dopa; in 1960 Oleh Hornykiewicz found that the brains of people with Parkinson's disease had lost much of their dopamine; and in 1967 George Cotzias showed that slowly increased doses of levodopa by mouth helped patients dramatically.",
++   "expert": "Levodopa (L-3,4-dihydroxyphenylalanine) occurs in Mucuna pruriens seeds (about 4-6%), used in Ayurvedic medicine, and was first isolated in 1913 by Marcus Guggenheim from Vicia faba seedlings; Casimir Funk had synthesized racemic D,L-dopa two years earlier. Arvid Carlsson (Nobel Prize 2000) found that reserpine depleted brain catecholamines and that D,L-dopa, but not 5-hydroxytryptophan, reversed reserpine-induced akinesia in rabbits; Oleh Hornykiewicz reported marked dopamine depletion in the caudate and putamen of Parkinson's disease brains in 1960; and in 1967 George Cotzias introduced slowly escalated high-dose oral levodopa (up to 16 g a day).",
++   "sources": [
++    {
++     "label": "Ovallath and Sulthana, Ann Indian Acad Neurol 2017: levodopa, history and therapeutic applications",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5586109/"
++    },
++    {
++     "label": "Bhattacharyya, Ann Indian Acad Neurol 2022: the story of levodopa, a long and arduous journey",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC8954318/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "LITHIUM CARBONATE",
++   "category": "Inorganic salt",
++   "simple": "Lithium is the lightest metal in nature. In 1949 the Australian psychiatrist John Cade gave lithium carbonate to guinea pigs and saw them become sluggish for a while; he then tried lithium salts in patients and found that they calmed severe mania. After controlled trials by the Danish psychiatrist Mogens Schou, the US FDA approved lithium for mania in 1970.",
++   "expert": "Lithium, the lightest metal in nature, was reintroduced to psychiatry by John F. Cade, whose guinea-pig experiments with lithium carbonate led to the 1949 report 'Lithium salts in the treatment of psychotic excitement'. Mogens Schou's placebo-controlled crossover trial (published 1954) confirmed the antimanic effect, and his group went on to study prophylaxis; the FDA approved lithium for mania in 1970 and for maintenance treatment in 1978.",
++   "sources": [
++    {
++     "label": "López-Muñoz et al., Int J Mol Sci 2018: a history of the pharmacological treatment of bipolar disorder",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6073684/"
++    },
++    {
++     "label": "Shorter, Bipolar Disord 2009: the history of lithium therapy (abstract)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC3712976/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "CHLORPROMAZINE",
++   "category": "Made by chemical synthesis (phenothiazine)",
++   "simple": "Chlorpromazine was made on December 11, 1951 by the chemist Paul Charpentier at the French company Rhône-Poulenc. The surgeon Henri Laborit first used it in 1952 to help with anaesthesia and noticed that it made patients calm and unconcerned without putting them to sleep. Psychiatrists Jean Delay and Pierre Deniker in Paris then treated patients with psychoses with it. Until then there had been no effective medicine for mental illness.",
++   "expert": "Chlorpromazine (4560 RP) was synthesized on December 11, 1951 by Paul Charpentier at Rhône-Poulenc and released for clinical investigation in 1952 as a potentiator of general anaesthesia. Henri Laborit, working with Huguenard and Alluaume on artificial hibernation against surgical shock, found that it produced disinterest without loss of consciousness and reported it in February 1952 as 'a new vegetative (autonomic) stabilizer'. Clinical studies in Pierre Deniker's service in Jean Delay's department at Sainte-Anne began on March 24, 1952, and it became available on prescription in France in November 1952.",
++   "sources": [
++    {
++     "label": "Ban, Neuropsychiatr Dis Treat 2007: fifty years chlorpromazine, a historical perspective",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC2655089/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "DIAZEPAM",
++   "category": "Made by chemical synthesis (benzodiazepine)",
++   "simple": "Diazepam (Valium) belongs to the benzodiazepines, a family of medicines that began when the chemist Leo Sternbach discovered the first one, chlordiazepoxide, by accident in 1955. The company Hoffmann-La Roche has sold diazepam since 1963. It became one of the most successful medicines of the 'psychopharmacological revolution' that began in the 1950s, used for anxiety and epilepsy.",
++   "expert": "Diazepam is a benzodiazepine, a fused benzene and diazepine ring. The first benzodiazepine, chlordiazepoxide (Librium), was discovered accidentally by Leo Sternbach in 1955 and made available in 1960 by Hoffmann-La Roche, which has marketed diazepam (Valium) since 1963. Diazepam became among the most successful drugs of the psychopharmacological revolution that began in the 1950s, setting a standard for potency, onset of action and safety in anxiety and epilepsy.",
++   "sources": [
++    {
++     "label": "Calcaterra and Barrow, ACS Chem Neurosci 2014: Classics in Chemical Neuroscience, diazepam (Valium) (abstract)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC3990949/"
++    },
++    {
++     "label": "Pandeya and Rajput, Int J Med Chem 2012: Mannich and Schiff bases of 1,5-benzodiazepines (introduction)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC4207415/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "ATROPINE",
++   "category": "Purified from a plant (Atropa belladonna)",
++   "simple": "Atropine is a natural substance from the plant Atropa belladonna and related plants of the Solanaceae family. A chemist named Mein first isolated it in 1832 but did not publish his work; a year later Geiger and Hesse published how they had isolated it.",
++   "expert": "Atropine is an anticholinergic tropane alkaloid of Atropa belladonna and related Solanaceae. It was the first tropane alkaloid to be isolated, from the leaves and roots of A. belladonna by Mein in 1832, who did not publish; Geiger and Hesse published its isolation from A. belladonna and Hyoscyamus niger in 1833. Willstätter obtained its correct structure in 1889.",
++   "sources": [
++    {
++     "label": "Shim et al., Nat Prod Bioprospect 2022: anticholinergic tropane alkaloids in therapeutics",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9478010/"
++    },
++    {
++     "label": "Kim et al., Molecules 2016: tropane and granatane alkaloid biosynthesis",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6274040/"
++    }
++   ],
++   "checked": "2026-11-21"
++  },
++  {
++   "medicine": "LIDOCAINE",
++   "category": "Made by chemical synthesis (amide local anaesthetic)",
++   "simple": "Lidocaine was first made by the chemist Nils Löfgren in 1935 in a laboratory in Stockholm, where he tasted the compounds he made. In 1943 he found that the 57th compound he tested quickly numbed his tongue. Developed with Bengt Lundquist as a faster and longer-acting local anaesthetic, it was patented as Xylocaine in Sweden on May 11, 1948, and approved in the USA in November 1948.",
++   "expert": "Lidocaine, an amide-type local anaesthetic, was first synthesized by Nils Löfgren in 1935 in Hans von Euler's Stockholm laboratory; in 1943 Löfgren found that the 57th compound he tasted rapidly numbed his tongue, and with Bengt Lundquist he developed it as a faster-acting, longer-lasting local anaesthetic with less allergenic potential. Based on Goldberg's toxicology and Torsten Gordh's clinical results, the Swedish patent for Xylocaine was approved on May 11, 1948, and the FDA approved it in November 1948.",
++   "sources": [
++    {
++     "label": "Karnina et al., Ann Med Surg (Lond) 2021: molecular mechanisms of lidocaine",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC8379473/"
++    },
++    {
++     "label": "Chida et al., Pharmacol Ther 2024: the role of lidocaine in cancer progression (introduction)",
++     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC11162934/"
++    }
++   ],
++   "checked": "2026-11-21"
+   }
+  ],
+- "held_back": {
+-  "CISPLATIN": "none of the history (Peyrone 1844, Werner 1893, Rosenberg 1965, FDA 1978) could be checked: PMC would not serve PMC4146684, its abstract does not say it, and PMC7606369 is about hearing loss",
+-  "ARTEMISININ": "artemisinin is not a medicine page in the catalogue (artemether and artesunate are)"
+- }
++ "held_back": {}
+ }
+diff -ruN src525/pipeline/run_all.sh src526/pipeline/run_all.sh
+--- src525/pipeline/run_all.sh	2026-11-20 13:59:20.000000000 -0500
++++ src526/pipeline/run_all.sh	2026-11-21 00:52:51.214762737 -0500
+@@ -8,9 +8,12 @@
+ # 1d. Japan: save PMDA's "List of Approved Drugs" PDF by hand as raw/japan_approvals.pdf (PMDA does not permit automated downloads), then:
+ python3 pipeline/read_pmda_list.py raw https://www.pmda.go.jp/files/000281190.pdf   # use the URL the PDF was saved from
+ python3 pipeline/fetch_who_eml.py raw                 # 1e. WHO Essential Medicines List from WHO's eEML (needs list.essentialmeds.org)
+-python3 pipeline/build_catalogue.py raw site/data && python3 pipeline/fetch_extra_chembl.py raw site/data   # ChEMBL structures for EU-only and Japan-only entries (resumable)
+ python3 pipeline/build_catalogue.py raw site/data     # 2. merge into the catalogue
+-[ -f raw/pubchem.json ] || { python3 pipeline/crosscheck_pubchem.py raw site/data; python3 pipeline/build_catalogue.py raw site/data; }  # 3. PubChem cross-check, then merge again
++# 3. PubChem cross-check, then merge again. It runs before the EU/Japan-only top-up below because that step also writes raw/pubchem.json;
++#    the marker "crosscheck" is set only by a full run (v5.26: the old [ -f raw/pubchem.json ] test skipped it on every fresh build)
++grep -qs '"crosscheck"' raw/pubchem.json || { python3 pipeline/crosscheck_pubchem.py raw site/data; python3 pipeline/build_catalogue.py raw site/data; }
++python3 pipeline/fetch_extra_chembl.py raw site/data  # ChEMBL structures for EU-only and Japan-only entries (resumable; tops up raw/pubchem.json)
++python3 pipeline/build_catalogue.py raw site/data
+ # 3b. slow, cached steps that read the drug files and write raw/*.json; build_catalogue merges them on the next line
+ #     Needs network access to files.rcsb.org as well, and: pip install gemmi
+ [ -f raw/manufacturing.json ] || python3 pipeline/fetch_manufacturing.py raw site/data
+diff -ruN src525/site/config/site.json src526/site/config/site.json
+--- src525/site/config/site.json	2026-11-20 13:55:44.000000000 -0500
++++ src526/site/config/site.json	2026-11-21 00:51:57.791573618 -0500
+@@ -1,6 +1,6 @@
+ {
+  "_readme": "Public address of the site, used for canonical links, link previews, the sitemap and share buttons. Change base_url if the site moves to its own domain. Paste the content value of a Google Search Console or Bing Webmaster Tools verification meta tag into the matching field, then rebuild (python3 pipeline/build_static_pages.py site).",
+  "base_url": "https://pillbypill.netlify.app",
+- "google_site_verification": "",
++ "google_site_verification": "j6WJ5uHgqb6Yv0c-jErJdcwSiuOu_eR4PqvzDWkue5A",
+  "bing_site_verification": ""
+ }
+diff -ruN src525/site/css/base.css src526/site/css/base.css
+--- src525/site/css/base.css	2026-11-20 13:55:44.000000000 -0500
++++ src526/site/css/base.css	2026-11-21 00:52:17.484112773 -0500
+@@ -132,3 +132,10 @@
+ .az-nav{display:flex;flex-wrap:wrap;gap:.3rem .7rem;font-weight:700}.az-nav a{display:inline-flex;align-items:center;min-height:24px;min-width:24px}
+ .og-preview{max-width:100%;height:auto;border-radius:10px;border:1px solid var(--line)}
+ pre.snippet{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:.6rem;font-size:.85rem}
++
++/* Option 2: Unified 6-card start-page lens grid (no Simple / In-depth split headers) */
++.lens-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:24px}
++@media (max-width:860px){.lens-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
++@media (max-width:560px){.lens-grid{grid-template-columns:1fr}}
++.lens-card{margin-top:0;background:var(--paper);border:1.5px solid var(--line);box-shadow:0 1px 2px rgba(15,23,42,.04);transition:border-color .15s,transform .12s}
++.lens-card:hover{border-color:var(--accent);transform:translateY(-1px)}
+diff -ruN src525/site/js/app.js src526/site/js/app.js
+--- src525/site/js/app.js	2026-11-20 14:00:24.000000000 -0500
++++ src526/site/js/app.js	2026-11-21 00:52:17.482570487 -0500
+@@ -20,12 +20,12 @@
+ 
+ async function start() {
+   const st = await data.stats();
+-  const door = (env, title, text) => html`<section class="door-col door-${env}"><h2>${title}</h2><p>${text}</p>
+-    ${Object.entries(ROLES).filter(([, r]) => r.env === env).map(([key, r]) => html`<a class="role" href="${r.path}" data-role="${key}"><span aria-hidden="true">${r.icon}</span><b>${r.name}</b><i>${r.line}</i></a>`)}</section>`;
++  const cards = Object.entries(ROLES).map(([key, r]) =>
++    html`<a class="role lens-card lens-${r.env}" href="${r.path}" data-role="${key}"><span aria-hidden="true">${r.icon}</span><b>${r.name}</b><i>${r.line}</i></a>`);
+   return { env: "start", html: html`<div class="shell shell-start"><main id="main" tabindex="-1">
+     <header class="start-head"><p class="logo big">Pill <span>by</span> Pill</p><h1>The story of the world's medicines.</h1>
+-      <p class="lede">${num(st.total)} medicines, each with its sources. Choose who you are and we'll take you to the right place.</p></header>
+-    <div class="doors">${door("explore", "Simple", "Stories, pictures and plain words.")}${door("ref", "In-depth", "Dense data, structures and citations.")}</div>
++      <p class="lede">${num(st.total)} medicines, each with its sources. How are you exploring today?</p></header>
++    <section class="lens-grid" aria-label="Choose your lens">${cards}</section>
+     <footer class="foot"><p>For learning, not medical advice. <a href="#/ref/data">Sources</a> · <a href="#/fund">How this site is funded</a> · <a href="#/privacy">Privacy</a> · <a href="#/share">Share Pill by Pill</a> · <a href="/medicines/">All medicines A to Z</a></p></footer></main></div>` };
+ }
+ 
+@@ -136,8 +136,13 @@
+     view = await resolve(parts, new URLSearchParams(qs || ""));
+   } catch (e) {
+     const env = parts[0] === "ref" ? "ref" : "explore";
+-    view = { env, html: page({ title: "We couldn't find that page", lede: "The link may be old, or the data file did not load.",
+-      body: html`<p><a class="btn" href="#/">Go to the start</a></p><p class="muted">${e.message}</p>` }) };
++    const isNet = Boolean(e && e.network);        // set by data.getJSON when the connection, not the page, failed
++    view = isNet
++      ? { env, html: page({ title: "Connection interrupted", lede: "Your connection dropped while loading this page's data.",
++          body: html`<p><button type="button" class="btn" id="retry-route">Try again</button> <a class="btn" href="#/">Go to the start</a></p><p class="muted small">${e.message}</p>` }),
++          mount(root) { root.querySelector("#retry-route")?.addEventListener("click", () => route()); } }
++      : { env, html: page({ title: "We couldn't find that page", lede: "The link may be old, or the data file did not load.",
++          body: html`<p><a class="btn" href="#/">Go to the start</a></p><p class="muted">${e.message}</p>` }) };
+   }
+   document.body.dataset.env = view.env;
+   const role = view.env === "ref" && ["clinician", "chemist", "industry"].includes(state.role) ? state.role : null;
+diff -ruN src525/site/js/data.js src526/site/js/data.js
+--- src525/site/js/data.js	2026-11-20 13:06:02.000000000 -0500
++++ src526/site/js/data.js	2026-11-21 00:52:17.483132984 -0500
+@@ -2,12 +2,19 @@
+ 
+ const cache = new Map();
+ 
+-export function getJSON(path) {
++export function getJSON(path, retries = 1) {
+   if (!cache.has(path)) {
+-    cache.set(path, fetch(path).then((r) => {
++    // v5.26: a dropped connection (fetch itself fails) is tried once more after 400 ms; a missing file or bad JSON is not
++    const load = (left) => fetch(path).then((r) => {
+       if (!r.ok) throw new Error(`${path}: ${r.status}`);
+       return r.json();
+-    }).catch((e) => { cache.delete(path); throw e; }));
++    }, (e) => {
++      if (left > 0) return new Promise((res) => setTimeout(res, 400)).then(() => load(left - 1));
++      const err = new Error(`${path}: the connection dropped (${e.message})`);
++      err.network = true;
++      throw err;
++    });
++    cache.set(path, load(retries).catch((e) => { cache.delete(path); throw e; }));
+   }
+   return cache.get(path);
+ }
+diff -ruN src525/site/js/explore.js src526/site/js/explore.js
+--- src525/site/js/explore.js	2026-11-20 13:52:38.000000000 -0500
++++ src526/site/js/explore.js	2026-11-21 01:11:55.563104866 -0500
+@@ -266,7 +266,7 @@
+       ${d.peptide_note ? html`<section class="x-panel"><h2>How this one is built</h2><p>${d.peptide_note.chemistry}</p>${sourceLine([{ label: d.peptide_note.source, url: d.peptide_note.source_url }])}</section>` : ""}
+       ${d.origin ? html`<section class="x-panel"><h2>Where ${d.name} comes from</h2><p class="who">${d.origin.category}</p><p>${d.origin.simple}</p>${sourceLine(d.origin.sources, d.origin.checked)}</section>` : ""}
+       ${d.stories.map((s) => html`<section class="x-panel"><h2>${s.title}</h2>${s.who ? html`<p class="who">${s.who}</p>` : ""}<p>${s.simple}</p>${sourceLine([{ label: s.source, url: s.source_url }])}</section>`)}
+-      ${!d.stories.length && !d.origin ? html`<p class="muted">We have not written the discovery story of ${d.name} yet. The explanation above is about its whole family of medicines.</p>` : ""}`;
++      ${!d.stories.length && !d.origin ? recordsHistory(d, await data.familyOf(d.id)) : ""}`;
+     return { html: page({ level: "deep", trail: [...trail, ["How it's made"]], kicker: "Deep dive", title: `How ${d.name} is made`, body,
+       more: [{ title: "All the ways medicines are made", text: "Chemists, cells and machines.", href: "#/explore/made" }] }) };
+   }
+@@ -302,6 +302,37 @@
+     body, more }), mount(root) { mountShare(root, d, shareUrl); } };
+ }
+ 
++/** v5.26: for a medicine nobody has written a discovery story for, what its own records say (no dead end on the made page).
++ *  Built from fields the page already has (first dates by region, US generics, family, WHO list); nothing is copied into the data files. */
++function recordsHistory(d, fam) {
++  const rows = worldTimeline(d), us = d.us, year = (s) => String(s).slice(0, 4), items = [];
++  if (rows.length) {
++    const r = rows[0];
++    items.push(html`<li>The oldest date in our records is <b>${year(r.date)}</b>: ${r.place}, ${r.kind}.</li>`);
++  }
++  if (us && us.first_date && us.first_generic_date && us.counts.ANDA) {
++    const gap = Number(year(us.first_generic_date)) - Number(year(us.first_date));
++    items.push(html`<li>The first US generic copy was approved in <b>${year(us.first_generic_date)}</b>${gap > 0 ? `, ${gap} year${gap === 1 ? "" : "s"} after the first US approval` : ""}. FDA's records list ${num(us.counts.ANDA)} generic application${us.counts.ANDA === 1 ? "" : "s"}.</li>`);
++  }
++  if (fam) {
++    const first = fam.members[0], n = fam.members.length;
++    items.push(fam.earliest === d.id
++      ? html`<li>It is the earliest, in our records, of ${n} medicines that share the name ending <b>${fam.stem}</b> and the same target (${fam.target_name}).</li>`
++      : html`<li>It is one of ${n} medicines that share the name ending <b>${fam.stem}</b> and the same target (${fam.target_name}). The earliest of them in our records is <a href="#/explore/medicine/${first.id}">${first.name}</a> (${first.year}).</li>`);
++  }
++  if (d.who_eml) items.push(html`<li>It is on WHO's list of essential medicines.</li>`);
++  if (!items.length) return html`<p class="muted">We have not written the discovery story of ${d.name} yet, and our records hold no dates for it. The explanation above is about its whole family of medicines.</p>`;
++  const seen = new Set(), sources = [...rows.slice(0, 1).map((r) => ({ label: r.source, url: r.url })),
++    ...(us && us.first_generic_date && us.counts.ANDA ? [{ label: us.source, url: us.source_url }] : []),
++    ...(fam ? [{ label: `ChEMBL target ${fam.target_chembl_id}`, url: fam.target_url }] : []),
++    ...(d.who_eml ? [{ label: "WHO Essential Medicines List", url: d.who_eml.entries[0].url }] : [])].filter((s) => s.url && !seen.has(s.url) && seen.add(s.url));
++  return html`<section class="x-panel" id="records-history"><h2>📜 What the records say</h2>
++    <p>Nobody has written the discovery story of ${d.name} for this site yet. Here is what its records tell us:</p>
++    <ul>${items}</ul>
++    <p class="muted small">The section above is about how medicines like this one are made in general. Each place's records count a different thing (Canada's date is when it first went on sale), and older medicines may have been approved before the records began. A family is a shared name ending and target in ChEMBL; its earliest member here was not necessarily the first of its kind.</p>
++    ${sourceLine(sources)}</section>`;
++}
++
+ function timelineSimple(d) {
+   const rows = worldTimeline(d);
+   if (rows.length < 2) return "";
+diff -ruN src525/site/js/layout.js src526/site/js/layout.js
+--- src525/site/js/layout.js	2026-11-20 13:53:14.000000000 -0500
++++ src526/site/js/layout.js	2026-11-21 00:52:17.483800538 -0500
+@@ -49,7 +49,7 @@
+     <header class="x-top"><a class="logo" href="#/">Pill <span>by</span> Pill</a>
+       <nav class="x-nav" aria-label="Explore">${EXPLORE_NAV.map(([href, label, icon]) =>
+         html`<a href="${href}"${current === href ? html` aria-current="page"` : ""}><span aria-hidden="true">${icon}</span> ${label}</a>`)}</nav>
+-      <a class="door" href="#/ref" title="The reference side, for experts">In-depth →</a></header>
++      <a class="door" href="#/ref" title="Switch to the Reference view">Reference →</a></header>
+     <main id="main" tabindex="-1">${content}</main>
+     <footer class="foot"><p>Pill by Pill is for learning. It does not give medical advice: ask a doctor or pharmacist about your own medicines.</p>
+       <p><a href="#/ref/data">Where the facts come from</a> · <a href="#/fund">How this site is funded</a> · <a href="#/privacy">Privacy</a> · <a href="#/share">Share Pill by Pill</a> · <a href="#/">Choose a different path</a></p></footer>
+@@ -64,7 +64,7 @@
+         <input id="r-q" type="search" placeholder="Find a drug: name, brand, code…" aria-controls="r-suggest"><ul id="r-suggest" class="suggest" hidden></ul></form>
+       <nav class="r-roles" aria-label="Path">${["clinician", "chemist", "industry"].map((r) =>
+         html`<a href="${ROLES[r].path}"${role === r ? html` aria-current="true"` : ""}>${ROLES[r].name}</a>`)}</nav>
+-      <a class="door" href="#/explore">← Simple</a></header>
++      <a class="door" href="#/explore" title="Switch to the Explore view">← Explore</a></header>
+     <div class="r-frame"><nav class="r-side" aria-label="Reference">${REF_NAV.map(([href, label]) =>
+         html`<a href="${href}"${current === href ? html` aria-current="page"` : ""}>${label}</a>`)}<a href="#/fund">Funding</a></nav>
+       <main id="main" tabindex="-1">${content}</main></div>
+diff -ruN src525/site/version.json src526/site/version.json
+--- src525/site/version.json	2026-11-20 13:59:20.000000000 -0500
++++ src526/site/version.json	2026-11-21 00:51:57.791631900 -0500
+@@ -1 +1 @@
+-{"version": "5.25", "built": "2026-11-20"}
++{"version": "5.26", "built": "2026-11-21"}
+\ No newline at end of file
+diff -ruN src525/tests/test_data.py src526/tests/test_data.py
+--- src525/tests/test_data.py	2026-11-20 13:56:40.000000000 -0500
++++ src526/tests/test_data.py	2026-11-21 00:53:26.024648935 -0500
+@@ -112,7 +112,7 @@
+ check("v5.18 radiopharmaceutical and allergen types come only from EMA's ATC code (V09, V10, V01)", new_types and all(re.match(r"EMA ATC code V(09|10|01)", d.get("type_basis") or "") for d in new_types), f"{len(new_types)} typed")
+ check("every type in the catalogue has a how-it-is-made entry and a type code", all(t in made for t in stats["by_type"]))
+ orig = [d for d in drugs.values() if d.get("origin")]
+-check("origin stories (v5.18 + v5.24): 33 medicines, each with https sources and a checked date", len(orig) == 33 and all(d["origin"]["sources"] and all(is_url(s["url"]) for s in d["origin"]["sources"]) and d["origin"]["checked"] for d in orig), str(len(orig)))
++check("origin stories (v5.18 + v5.24 + v5.26): 60 medicines, each with https sources and a checked date", len(orig) == 60 and all(d["origin"]["sources"] and all(is_url(s["url"]) for s in d["origin"]["sources"]) and d["origin"]["checked"] for d in orig), str(len(orig)))
+ imet = drugs["imetelstat-sodium"]
+ check("imetelstat: strand read from FDA's registry name matches ChEMBL (TAGGGTTAGACAA), backbone kept word for word, typed from the registry",
+       imet["sequence"]["components"][0]["sequence"] == "TAGGGTTAGACAA" and "3'-amino-3'-deoxy-P-thio" in imet["sequence"]["chemistry"]["as_named"]
+@@ -182,9 +182,18 @@
+       and not any(re.search(r"vaccine|immunoglobulin|plasma", r["name"], re.I) for d in eml.values() for r in d["who_eml"]["entries"]))
+ orig = json.loads((pathlib.Path(__file__).resolve().parent.parent / "pipeline" / "origin_stories.json").read_text())
+ with_origin = [d for d in drugs.values() if d.get("origin")]
+-check("origin stories: 33 attached, every source https, held-back stories recorded and not shown",
+-      len(orig["stories"]) == 33 == len(with_origin) and all(x["url"].startswith("https://") for d in with_origin for x in d["origin"]["sources"])
+-      and set(orig.get("held_back", {})) == {"CISPLATIN", "ARTEMISININ"} and not drugs["cisplatin"].get("origin"), str(len(with_origin)))
++check("origin stories: 60 attached, every source https, nothing held back; cisplatin and artesunate (v5.26) now have theirs",
++      len(orig["stories"]) == 60 == len(with_origin) and all(x["url"].startswith("https://") for d in with_origin for x in d["origin"]["sources"])
++      and not orig.get("held_back") and drugs["cisplatin"].get("origin") and drugs["artesunate"].get("origin"), str(len(with_origin)))
++check("v5.26 origin stories carry their own checked date (2026-11-21); the 33 older ones keep 2026-11-20",
++      sum(d["origin"]["checked"] == "2026-11-21" for d in with_origin) == 27 and sum(d["origin"]["checked"] == "2026-11-20" for d in with_origin) == 33)
++check("v5.26 origin stories: claims their sources did not support stay out (chlorpromazine 1950, Horwitz 1964, Kelsey, 2SD4, top-selling 1968, Michele/Barnett)",
++      not any(re.search(r"in 1950 by Paul|Horwitz|Kelsey|2SD4|1968 to 1982|Michele|Barnett|over 90%|ISIS 396443|deadly nightshade", d["origin"]["simple"] + d["origin"]["expert"]) for d in with_origin)
++      and "December 11, 1951" in drugs["chlorpromazine"]["origin"]["expert"])
++check("v5.26 origin stories: no source is a paper about something else (folic-acid AZT conjugates, drug-repurposing review, siRNA prices)",
++      not any(x["url"].rstrip("/").endswith(("PMC2729114", "PMC11019736", "PMC11054365", "PMC6466519", "PMC1369014")) for d in with_origin for x in d["origin"]["sources"]))
++check("PubChem cross-check ran (v5.26: a fresh build used to skip it): aspirin and most ChEMBL structures have a PubChem CID",
++      drugs["aspirin"]["structure"]["pubchem_cid"] == 2244 and sum(bool((d.get("structure") or {}).get("pubchem_cid")) for d in drugs.values()) > 2000)
+ check("origin stories: claims the sources did not support stay out (no 'Madagascar periwinkle', '14-membered', '150 analogues', 'Novolin, 1991')",
+       not any(re.search(r"Madagascar|14-membered|150 (synthetic )?analogues|1991|woolly|goat's rue", d["origin"]["simple"] + d["origin"]["expert"]) for d in with_origin))
+ quiz = json.loads((D / "quiz.json").read_text())
+diff -ruN src525/tests/test_pipeline.py src526/tests/test_pipeline.py
+--- src525/tests/test_pipeline.py	2026-11-20 13:14:58.000000000 -0500
++++ src526/tests/test_pipeline.py	2026-11-21 01:04:39.719101617 -0500
+@@ -59,7 +59,7 @@
+ # v5.18: origin stories are curated data with https sources, and each names one medicine
+ import json as _json                                  # noqa: E402
+ _orig = _json.loads((PIPE / "origin_stories.json").read_text(encoding="utf-8"))
+-check("origin stories: 33 entries (9 from v5.18, 24 checked in v5.24), each with category, Simple and In-depth text and https sources", len(_orig["stories"]) == 33 and all(
++check("origin stories: 60 entries (9 from v5.18, 24 checked in v5.24, 27 checked in v5.26), each with category, Simple and In-depth text and https sources", len(_orig["stories"]) == 60 and all(
+       o["medicine"] and o["category"] and o["simple"] and o["expert"] and o["sources"] and all(s["url"].startswith("https://") and s["label"] for s in o["sources"]) for o in _orig["stories"]))
+ check("origin stories: statements the cited sources did not support are gone (Borneo, Norway, 'defend its territory', 'eats only a few times a year')",
+       not any(w in (o["simple"] + o["expert"]).lower() for o in _orig["stories"] for w in ("borneo", "norway", "territory", "few times a year", "golf course in japan")))
+diff -ruN src525/tests/test_site.py src526/tests/test_site.py
+--- src525/tests/test_site.py	2026-11-20 13:58:52.000000000 -0500
++++ src526/tests/test_site.py	2026-11-21 00:54:19.142554215 -0500
+@@ -336,6 +336,65 @@
+         check("the A to Z address opens the medicine list", await pg.evaluate("location.pathname") == "/medicines/" and "Medicines" in await pg.inner_text("#main"))
+         check("no script errors, missing files or outside requests on the v5.25 pages", not log["errors"] and not log["missing"] and not log["external"], str({k: v[:3] for k, v in log.items() if v}))
+ 
++    # 8d. v5.26: one start-page grid of six lenses, neutral switcher, one retry on a dropped connection, records panel instead of a dead end
++    fams = json.loads((SITE / "data" / "family_trees.json").read_text())["families"]
++    in_family = {m["id"] for f in fams for m in f["members"]}
++    no_story = None
++    for f in sorted((SITE / "data" / "drugs").glob("*.json")):
++        d = json.loads(f.read_text())
++        if not d.get("stories") and not d.get("origin") and d["id"] in in_family and (d.get("us") or {}).get("first_generic_date") and (d.get("us") or {}).get("counts", {}).get("ANDA"):
++            no_story = d
++            break
++    async with open_site(SITE) as (pg, log):
++        await go(pg, "#/")
++        cards = await pg.evaluate("[...document.querySelectorAll('.lens-grid a.role')].map(a => a.getAttribute('href'))")
++        heads = await pg.evaluate("[...document.querySelectorAll('#main h2')].map(h => h.textContent.trim())")
++        check("start page: all six lenses in one grid, no Simple / In-depth split (Option 2)", len(cards) == 6 and len(set(cards)) == 6 and not {"Simple", "In-depth"} & set(heads)
++              and "How are you exploring today?" in await pg.inner_text("#main"), f"{cards} {heads}")
++        await go(pg, "#/explore")
++        to_ref = await pg.evaluate("document.querySelector('a.door')?.textContent.trim()")
++        await go(pg, "#/ref")
++        to_exp = await pg.evaluate("document.querySelector('a.door')?.textContent.trim()")
++        check("switcher reads 'Reference →' and '← Explore'", to_ref == "Reference →" and to_exp == "← Explore", f"{to_ref} / {to_exp}")
++        if no_story:
++            await go(pg, f"#/explore/medicine/{no_story['id']}/made")
++            text = await pg.inner_text("#main")
++            years = sorted(str(x)[:4] for x in [(no_story.get("us") or {}).get("first_date"), (no_story.get("eu") or {}).get("first_authorised"),
++                                                (no_story.get("ca") or {}).get("first_marketed"), (no_story.get("jp") or {}).get("first_new_ingredient")] if x)
++            check("made page without a discovery story shows what the records say (oldest date, first generic, family) and sources",
++                  await pg.evaluate("!!document.querySelector('#records-history .src a, #records-history a[href^=\"https://\"]')")
++                  and "We have not written" not in text and f"The oldest date in our records is {years[0]}" in text
++                  and f"first US generic copy was approved in {no_story['us']['first_generic_date'][:4]}" in text and "share the name ending" in text, no_story["id"])
++        else:
++            check("made page without a discovery story shows what the records say", False, "no suitable medicine found")
++        check("v5.26 pages: no script errors, missing files or outside requests", not log["errors"] and not log["missing"] and not log["external"], str({k: v[:3] for k, v in log.items() if v}))
++    async with open_site(SITE) as (pg, log):
++        await go(pg, "#/")
++        drops = {"n": 0}
++        async def drop_once(r):
++            if drops["n"] == 0:
++                drops["n"] += 1
++                return await r.abort()
++            await r.fallback()
++        await pg.route("**/data/drugs/ibuprofen.json", drop_once)
++        await go(pg, "#/explore/medicine/ibuprofen")
++        check("a dropped connection is tried once more and the page still opens", drops["n"] == 1 and (await pg.inner_text("h1")).strip() == "Ibuprofen", str(drops))
++        async def drop_all(r):
++            await r.abort()
++        await pg.route("**/data/drugs/naproxen.json", drop_all)
++        await go(pg, "#/explore/medicine/naproxen")
++        h1 = (await pg.inner_text("h1")).strip()
++        has_retry = await pg.evaluate("!!document.querySelector('#retry-route')")
++        await pg.unroute("**/data/drugs/naproxen.json", drop_all)
++        await pg.evaluate("document.getElementById('app').dataset.ready = ''")
++        if has_retry:
++            await pg.click("#retry-route")
++            await pg.wait_for_function("h => document.getElementById('app').dataset.ready === h", arg="#/explore/medicine/naproxen", timeout=15000)
++        check("when the connection stays down: 'Connection interrupted' with a Try again button that reloads the page",
++              h1 == "Connection interrupted" and has_retry and (await pg.inner_text("h1")).strip() == "Naproxen", h1)
++        await go(pg, "#/explore/medicine/not-a-medicine")
++        check("a missing page still says it could not be found (not 'Connection interrupted')", "couldn't find" in await pg.inner_text("h1"))
++
+     # 9. phone width: no page scrolls sideways, nothing is cut off at the edge (wide tables and the decade chart
+     #    scroll inside their own box), and links and buttons that are not inline text are at least 24 px tall
+     PHONE_PAGES = ["#/", "#/explore", "#/explore/medicines", "#/explore/medicine/aspirin", "#/explore/medicine/aspirin/molecule",
+@@ -344,7 +403,7 @@
+                    "#/ref/drug/atorvastatin/structure", "#/ref/drug/atorvastatin/binding", "#/ref/drug/pembrolizumab/binding",
+                    "#/ref/drug/semaglutide/names", "#/ref/drug/atorvastatin/approvals", "#/ref/topics", "#/ref/data", "#/fund",
+                    "#/ref/families", "#/ref/compare/atorvastatin/rosuvastatin", "#/ref/drug/amoxicillin/names", "#/ref/drug/sotorasib/binding",
+-                   "#/privacy", "#/share"]
++                   "#/privacy", "#/share"] + ([f"#/explore/medicine/{no_story['id']}/made"] if no_story else [])
+     async with open_site(SITE, width=390, height=844) as (pg, log):
+         over, cut, small = {}, {}, {}
+         for r in PHONE_PAGES:
