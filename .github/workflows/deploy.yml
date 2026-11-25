@@ -4,7 +4,7 @@ on:
   push:
     branches: ["main"]
   schedule:
-    - cron: "0 6 * * 1" # Weekly Monday 06:00 UTC refresh
+    - cron: "0 6 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -33,10 +33,22 @@ jobs:
 
       - name: Apply v6.2 Unified Release & Build Site
         run: |
-          python3 patches/2026-11-24_apply_v6.2_unified_release_v52.py \
-            --source-zip patches/2026-11-21_pill-by-pill-source_v6.0b.zip \
-            --patches-dir patches \
-            --out-zip /tmp/pill-by-pill-v6.2.zip
+          python3 - << 'EOF'
+          import importlib.util, pathlib, subprocess, sys, tempfile
+          spec = importlib.util.spec_from_file_location("v52", "patches/2026-11-24_apply_v6.2_unified_release_v52.py")
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          with tempfile.TemporaryDirectory() as td:
+              tree = mod._unpack_clean(pathlib.Path("patches/2026-11-21_pill-by-pill-source_v6.0b.zip"), pathlib.Path(td) / "tree")
+              try:
+                  mod.integrate_v62(tree, pathlib.Path("patches"))
+                  mod._pack_clean(tree, pathlib.Path("/tmp/pill-by-pill-v6.2.zip"))
+              except subprocess.CalledProcessError as e:
+                  print("=== FAILED CMD ===", e.cmd)
+                  print("=== STDOUT ===\n", e.stdout)
+                  print("=== STDERR ===\n", e.stderr)
+                  sys.exit(1)
+          EOF
           unzip -q /tmp/pill-by-pill-v6.2.zip -d /tmp/build
           touch /tmp/build/site/.nojekyll
 
