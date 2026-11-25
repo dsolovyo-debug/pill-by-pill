@@ -85,6 +85,16 @@ jobs:
 
           site = pathlib.Path("/tmp/build/site")
           base = "/pill-by-pill"
+          shim = (
+              '<script>(function(){const b="/pill-by-pill";const f=window.fetch;'
+              'window.fetch=function(u,o){if(typeof u==="string"&&u.startsWith("/")'
+              '&&!u.startsWith("//")&&!u.startsWith(b+"/"))u=b+u;return f.call(this,u,o);};})();</script>'
+          )
+
+          def rewrite_js(txt):
+              txt = re.sub(r'(\bfrom\s+|\bimport\s*\(\s*)(["\'`])/(?!(/|pill-by-pill/))', rf'\1\2{base}/', txt)
+              txt = re.sub(r'(fetch\(\s*|location\.href\s*=\s*|href\s*[:=]\s*|src\s*[:=]\s*|url\s*[:=]\s*)(["\'`])/(?!(/|pill-by-pill/))', rf'\1\2{base}/', txt)
+              return txt
 
           for p in site.rglob("*"):
               if not p.is_file():
@@ -92,11 +102,13 @@ jobs:
               if p.suffix == ".html":
                   txt = p.read_text(encoding="utf-8", errors="ignore")
                   txt = re.sub(r'(href|src|action)=(["\'])/(?!(/|pill-by-pill/))', rf'\1=\2{base}/', txt)
+                  txt = rewrite_js(txt)
+                  if shim not in txt:
+                      txt = re.sub(r'(<head[^>]*>)', r'\1' + shim, txt, count=1, flags=re.I)
                   p.write_text(txt, encoding="utf-8")
               elif p.suffix == ".js":
                   txt = p.read_text(encoding="utf-8", errors="ignore")
-                  txt = re.sub(r'(fetch\(\s*|location\.href\s*=\s*|href\s*:\s*|url\s*:\s*)(["\'])/(?!(/|pill-by-pill/))', rf'\1\2{base}/', txt)
-                  p.write_text(txt, encoding="utf-8")
+                  p.write_text(rewrite_js(txt), encoding="utf-8")
               elif p.suffix == ".css":
                   txt = p.read_text(encoding="utf-8", errors="ignore")
                   txt = re.sub(r'url\((["\']?)/(?!(/|pill-by-pill/))', rf'url(\1{base}/', txt)
