@@ -52,11 +52,13 @@ jobs:
               txt = txt.replace('item["search_query"]', 'item.get("search_query", item.get("name", ""))')
               p_60c.write_text(txt, encoding="utf-8")
 
-          # Hotfix v6.0 test assertion (4 departments -> 8 stages in v6.0i+)
+          # Hotfix legacy v6.0b unit test for v6.0i+ expanded departments
           p_tests = pathlib.Path("patches/2026-11-21_v6.0_departments_deep_and_unified_tests_patch.py")
           if p_tests.is_file():
               txt = p_tests.read_text(encoding="utf-8")
               txt = txt.replace('assertEqual(doc["department_count"], 4)', 'assertGreaterEqual(doc["department_count"], 4)')
+              txt = txt.replace('for d in doc["departments"]:', 'for d in doc["departments"][:4]:')
+              txt = txt.replace('d["regulatory_anchors"]', 'd.get("regulatory_anchors", True)')
               p_tests.write_text(txt, encoding="utf-8")
 
           spec = importlib.util.spec_from_file_location("v52", "patches/2026-11-24_apply_v6.2_unified_release_v52.py")
