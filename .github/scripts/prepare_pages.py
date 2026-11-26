@@ -109,6 +109,19 @@ def apply_site_fixes(site: pathlib.Path) -> None:
             dst = site / f.relative_to(FIXES)
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(f, dst)
+    # Grouped, role-aware Reference navigation (js/ref_nav.js) in place of the flat 55-link sidebar
+    css = site / "css" / "reference.css"
+    extra = (FIXES / "css" / "ref_nav.css").read_text(encoding="utf-8")
+    if "js/ref_nav.js" not in css.read_text(encoding="utf-8"):
+        css.write_text(css.read_text(encoding="utf-8") + "\n" + extra, encoding="utf-8")
+    lay = site / "js" / "layout.js"
+    ltxt = lay.read_text(encoding="utf-8")
+    if "ref_nav.js" not in ltxt:
+        ltxt, n = re.subn(r'\$\{REF_NAV\.map\(\(\[href, label\]\) =>\s*html`<a href="\$\{href\}"\$\{current === href \? html` aria-current="page"` : ""\}>\$\{label\}</a>`\)\}<a href="#/fund">Funding</a>',
+                          "${refNav(REF_NAV, current, role)}", ltxt)
+        if n != 1:
+            sys.exit("layout.js: could not find the Reference side navigation in refShell()")
+        lay.write_text('import { refNav } from "./ref_nav.js";\n' + ltxt, encoding="utf-8")
     app = site / "js" / "app.js"
     txt = app.read_text(encoding="utf-8")
     # 1. Lines a patch appended after the final route(); call. A top-level `return` is a syntax error
