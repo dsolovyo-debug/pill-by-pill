@@ -1,0 +1,450 @@
+diff --git a/.github/scripts/check_pages.py b/.github/scripts/check_pages.py
+new file mode 100644
+index 0000000..e993c5f
+--- /dev/null
++++ b/.github/scripts/check_pages.py
+@@ -0,0 +1,52 @@
++"""Open every page of a prepared site the way GitHub Pages serves it (under /<repo>/) in a real
++browser, follow the links on the main pages, and fail if any page shows "We couldn't find that
++page", throws a script error, or asks for a file that does not exist.
++Usage: python3 check_pages.py SITE_DIR --base /pill-by-pill"""
++import asyncio, mimetypes, os, sys, re
++from playwright.async_api import async_playwright
++HOST, SITE = "https://pages.example", sys.argv[1]
++BASE = "/" + (sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else "pill-by-pill").strip("/") + "/"
++SLUGS = re.findall(r'^  "([a-z0-9-]+)": M\(', open(os.path.join(SITE, "js/v6_routes.js")).read(), re.M)
++async def main():
++    async with async_playwright() as p:
++        b = await p.chromium.launch(); pg = await (await b.new_context()).new_page()
++        bad404, errs, cons = [], [], []
++        async def route(r):
++            url = r.request.url
++            if not url.startswith(HOST): return await r.abort()
++            path = url[len(HOST):].split("?")[0].split("#")[0]
++            f = os.path.join(SITE, path[len(BASE):]) if path.startswith(BASE) else None
++            if f and os.path.isdir(f): f = os.path.join(f, "index.html")
++            if f and os.path.isfile(f):
++                return await r.fulfill(path=f, content_type="text/javascript" if f.endswith(".js") else (mimetypes.guess_type(f)[0] or "application/octet-stream"))
++            bad404.append(path); return await r.fulfill(status=404, content_type="text/html", body="<h1>404</h1>")
++        await pg.route("**/*", route)
++        pg.on("pageerror", lambda e: errs.append(f"{pg.url}: {e}"))
++        pg.on("console", lambda m: cons.append(f"{pg.url}: {m.text}") if m.type == "error" else None)
++        todo = ["", "#/explore", "#/ref", "#/fund", "#/privacy", "#/share", "medicines/", "medicine/aspirin/", "#/explore/medicine/aspirin", "#/ref/drug/aspirin",
++                "#/ref/drug/sotorasib/binding", "#/ref/families", "#/ref/compare", "#/explore/quiz", "#/ref/departments", "#/ref/routes", "#/ref/vendors", "#/ref/equipment", "#/explore/how-drugs-are-built"]
++        todo += [f"#/{e}/{s}" for s in SLUGS for e in ("ref", "explore")]
++        seen, failed = set(), []
++        i = 0
++        while i < len(todo):
++            r = todo[i]; i += 1
++            if r in seen: continue
++            seen.add(r)
++            await pg.goto(HOST + BASE + r)
++            try: await pg.wait_for_function("document.getElementById('app')?.dataset.ready !== undefined", timeout=8000)
++            except Exception: pass
++            await pg.wait_for_timeout(250)
++            h1 = (await pg.evaluate("document.querySelector('#app h1')?.textContent.trim() || ''"))[:70]
++            if not h1 or "couldn't find" in h1 or "Connection" in h1:
++                msg = await pg.evaluate("document.querySelector('#app .muted')?.textContent || ''")
++                failed.append((r, h1, msg[:120]))
++            if i <= 19:   # follow links found on the main pages
++                for h in await pg.evaluate("[...document.querySelectorAll('#app a[href]')].map(a => a.getAttribute('href'))"):
++                    h = h.replace(BASE, "", 1) if h.startswith(BASE) else h
++                    if h.startswith("#/") and "?" not in h and h not in seen: todo.append(h)
++        print("pages checked:", len(seen)); print("FAILED:", len(failed))
++        for f in failed: print("  ", f)
++        print("404s:", sorted(set(bad404))[:20]); print("page errors:", errs[:10]); print("console errors:", cons[:10])
++        await b.close()
++        return 1 if (failed or bad404 or errs or cons) else 0
++sys.exit(asyncio.run(main()))
+diff --git a/.github/scripts/prepare_pages.py b/.github/scripts/prepare_pages.py
+new file mode 100644
+index 0000000..fe2a98b
+--- /dev/null
++++ b/.github/scripts/prepare_pages.py
+@@ -0,0 +1,189 @@
++"""Turn a built Pill by Pill site into one that works on GitHub Pages under a sub-path.
++
++GitHub Pages serves this repo at https://<owner>.github.io/<repo>/, so every root-absolute
++path ("/js/app.js", "/data/x.json", <base href="/">) must gain the "/<repo>" prefix.
++
++Usage: python3 prepare_pages.py SITE_DIR --base /pill-by-pill --url https://dsolovyo-debug.github.io/pill-by-pill
++       [--underlay BASE_SITE_ZIP]   copy a fully built older site underneath (catalogue data,
++                                    medicine pages, images) before the new files go on top.
++"""
++import argparse, pathlib, re, shutil, sys, tempfile, zipfile
++
++OLD_URLS = ("https://pillbypill.netlify.app",)
++
++def underlay(site: pathlib.Path, zpath: pathlib.Path) -> int:
++    """Files in the zip that the new build does not have are added; the new build always wins."""
++    added = 0
++    with zipfile.ZipFile(zpath) as z:
++        for n in z.namelist():
++            if n.endswith("/"):
++                continue
++            rel = n.split("site/", 1)[1] if n.startswith("site/") else n
++            dst = site / rel
++            if dst.exists():
++                continue
++            dst.parent.mkdir(parents=True, exist_ok=True)
++            with z.open(n) as src, open(dst, "wb") as out:
++                shutil.copyfileobj(src, out)
++            added += 1
++    return added
++
++def fix_missing_imports(site: pathlib.Path) -> list:
++    """Point relative ES-module imports at files that exist. A missing module makes GitHub serve its
++    HTML 404 page, which Chrome blocks ("strict MIME type checking") and which stops every script."""
++    exports = {}
++    for js in (site / "js").glob("*.js"):
++        for name in re.findall(r"export\s+(?:const|function|let|async function)\s+(\w+)", js.read_text(encoding="utf-8")):
++            exports.setdefault(name, js.name)
++    fixed = []
++    for js in (site / "js").glob("*.js"):
++        txt = js.read_text(encoding="utf-8")
++        def repl(m):
++            names, mod = m.group(1), m.group(2)
++            if (js.parent / mod).is_file():
++                return m.group(0)
++            wanted = [n.strip().split(" as ")[0] for n in names.strip("{} ").split(",") if n.strip()]
++            homes = {exports.get(n) for n in wanted}
++            if len(homes) == 1 and None not in homes:
++                fixed.append(f"{js.name}: {mod} -> ./{homes.pop()}")
++                return m.group(0).replace(mod, "./" + exports[wanted[0]])
++            sys.exit(f"{js.name} imports {mod}, which does not exist, and {wanted} has no single home")
++        txt2 = re.sub(r'import\s*(\{[^}]*\})\s*from\s*["\'](\./[^"\']+)["\']', repl, txt)
++        if txt2 != txt:
++            js.write_text(txt2, encoding="utf-8")
++    return fixed
++
++def prefix_paths(site: pathlib.Path, base: str, url: str) -> None:
++    root_abs = r'/(?!/|' + re.escape(base.strip("/")) + r'/)'
++    for p in site.rglob("*"):
++        if not p.is_file() or p.suffix not in (".html", ".js", ".css", ".xml", ".json", ".webmanifest", ".txt"):
++            continue
++        txt = p.read_text(encoding="utf-8", errors="ignore")
++        new = txt
++        for old in OLD_URLS:                      # canonical, og:url, sitemap, feed, share links
++            new = new.replace(old, url)
++        if p.suffix == ".html":
++            new = re.sub(r'(\s(?:href|src|action|content)=["\'])' + root_abs, r'\1' + base + '/', new)
++            # inline redirects such as location.replace("/#/ref/adme") in the static encyclopedia pages
++            new = re.sub(r'(location\.(?:replace|assign)\(\s*["\'])' + root_abs, r'\1' + base + '/', new)
++            new = re.sub(r'(location\.href\s*=\s*["\'])' + root_abs, r'\1' + base + '/', new)
++        elif p.suffix == ".css":
++            new = re.sub(r'(url\(["\']?)' + root_abs, r'\1' + base + '/', new)
++        elif p.suffix == ".js":
++            # module imports and string literals that start with a root path such as "/data/..."
++            new = re.sub(r'((?:\bfrom\s+|\bimport\s*\(\s*)["\'`])' + root_abs, r'\1' + base + '/', new)
++            new = re.sub(r'((?:fetch\(\s*|href\s*[:=]\s*|src\s*[:=]\s*|url\s*[:=]\s*|getJSON\(\s*|load\(\s*)["\'`])' + root_abs, r'\1' + base + '/', new)
++        elif p.name == "manifest.webmanifest":
++            new = re.sub(r'("(?:start_url|scope|src)"\s*:\s*")' + root_abs, r'\1' + base + '/', new)
++        elif p.name == "robots.txt":
++            new = re.sub(r'(?m)^((?:Allow|Disallow):\s*)' + root_abs, r'\1' + base + '/', new)
++        if new != txt:
++            p.write_text(new, encoding="utf-8")
++
++def patch_runtime(site: pathlib.Path, base: str) -> None:
++    """Every page loads js/app.js as a module. Put one small module in front of it that
++    (1) sends root-absolute fetch() calls to the sub-path and (2) lets the router see real paths
++    like /pill-by-pill/medicine/aspirin/ as /medicine/aspirin/. No inline script, so a strict
++    Content-Security-Policy never blocks it."""
++    (site / "js" / "base_path.js").write_text(
++        f'export const BASE = "{base}";\n'
++        "const f = window.fetch.bind(window);\n"
++        'window.fetch = (u, o) => f(typeof u === "string" && u.startsWith("/") && !u.startsWith("//") && !u.startsWith(BASE + "/") ? BASE + u : u, o);\n'
++        "export const sitePath = () => location.pathname.startsWith(BASE + \"/\") ? location.pathname.slice(BASE.length) : location.pathname;\n",
++        encoding="utf-8")
++    app = site / "js" / "app.js"
++    txt = app.read_text(encoding="utf-8")
++    if "base_path.js" not in txt:
++        txt = f'import {{ sitePath }} from "{base}/js/base_path.js";\n' + txt
++        txt = re.sub(r"location\.pathname(?=\.match|\))", "sitePath()", txt)
++        txt = txt.replace("/.test(location.pathname)", "/.test(sitePath())")
++        app.write_text(txt, encoding="utf-8")
++
++
++FIXES = pathlib.Path(__file__).resolve().parent.parent / "site-fixes"
++
++def apply_site_fixes(site: pathlib.Path) -> None:
++    """Copy .github/site-fixes/ into the site and wire the v6.x routes into app.js."""
++    for f in FIXES.rglob("*"):
++        if f.is_file():
++            dst = site / f.relative_to(FIXES)
++            dst.parent.mkdir(parents=True, exist_ok=True)
++            shutil.copyfile(f, dst)
++    app = site / "js" / "app.js"
++    txt = app.read_text(encoding="utf-8")
++    # 1. Lines a patch appended after the final route(); call. A top-level `return` is a syntax error
++    #    ("Illegal return statement") that stops the whole site from starting.
++    m = re.search(r'addEventListener\("hashchange",\s*route\);\s*\n\s*route\(\);', txt)
++    if not m:
++        sys.exit("app.js: could not find the closing route(); call")
++    tail = txt[m.end():]
++    if tail.strip():
++        print("app.js: removed", len([l for l in tail.splitlines() if l.strip()]), "stray lines after route();")
++    txt = txt[:m.end()] + "\n"
++    # 2. Send unknown #/ref/<slug> and #/explore/<slug> pages to the v6 route table
++    if "v6_routes.js" not in txt:
++        txt = 'import { v6Route } from "./v6_routes.js";\n' + txt
++        anchor = '  throw new Error("Page not found");'
++        if anchor not in txt:
++            sys.exit("app.js: could not find the Page not found line in resolve()")
++        txt = txt.replace(anchor, '  if ((area === "ref" || area === "explore") && a) { const v6 = await v6Route(area, a, query); if (v6) return v6; }\n' + anchor, 1)
++    app.write_text(txt, encoding="utf-8")
++
++
++def merge_sitemap(site: pathlib.Path, base_zip, url: str) -> int:
++    """One sitemap with absolute addresses: every page in the new build's sitemap plus the medicine
++    pages from the underlay site (search engines ignore relative <loc> values such as "/adme/")."""
++    locs = {}
++    def take(xml):
++        for loc, mod in re.findall(r"<loc>([^<]+)</loc>(?:\s*<lastmod>([^<]+)</lastmod>)?", xml):
++            for old in OLD_URLS:
++                loc = loc.replace(old, url)
++            if loc.startswith("/"):
++                loc = url + loc
++            locs[loc] = mod or locs.get(loc, "")
++    if base_zip:
++        with zipfile.ZipFile(base_zip) as z:
++            n = next((n for n in z.namelist() if n.split("site/", 1)[-1] == "sitemap.xml"), None)
++            if n:
++                take(z.read(n).decode("utf-8"))
++    sm = site / "sitemap.xml"
++    if sm.is_file():
++        take(sm.read_text(encoding="utf-8"))
++    rows = "".join(f"  <url><loc>{l}</loc>" + (f"<lastmod>{m}</lastmod>" if m else "") + "</url>\n" for l, m in sorted(locs.items()))
++    sm.write_text('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' + rows + "</urlset>\n", encoding="utf-8")
++    return len(locs)
++
++def verification_tags(site: pathlib.Path) -> None:
++    """Put the Search Console / Bing tags from config/site.json on the home page if a build dropped them."""
++    import json
++    cfg = site / "config" / "site.json"
++    if not cfg.is_file():
++        return
++    c = json.loads(cfg.read_text(encoding="utf-8"))
++    idx = site / "index.html"
++    txt = idx.read_text(encoding="utf-8")
++    for key, name in (("google_site_verification", "google-site-verification"), ("bing_site_verification", "msvalidate.01")):
++        if c.get(key) and name not in txt:
++            txt = txt.replace("</head>", f'<meta name="{name}" content="{c[key]}">\n</head>', 1)
++    idx.write_text(txt, encoding="utf-8")
++
++def main():
++    a = argparse.ArgumentParser()
++    a.add_argument("site"); a.add_argument("--base", required=True); a.add_argument("--url", required=True)
++    a.add_argument("--underlay")
++    o = a.parse_args()
++    site, base, url = pathlib.Path(o.site), "/" + o.base.strip("/"), o.url.rstrip("/")
++    if o.underlay:
++        print("underlay added", underlay(site, pathlib.Path(o.underlay)), "files")
++    apply_site_fixes(site)
++    for f in fix_missing_imports(site):
++        print("import fixed:", f)
++    prefix_paths(site, base, url)
++    print("sitemap pages:", merge_sitemap(site, o.underlay, url))
++    verification_tags(site)
++    patch_runtime(site, base)
++    (site / ".nojekyll").touch()
++    (site / "_headers").unlink(missing_ok=True)   # Netlify-only file; GitHub Pages ignores it
++    print("ready:", url + "/")
++
++main()
+diff --git a/.github/site-fixes/js/v6_routes.js b/.github/site-fixes/js/v6_routes.js
+new file mode 100644
+index 0000000..12824e4
+--- /dev/null
++++ b/.github/site-fixes/js/v6_routes.js
+@@ -0,0 +1,99 @@
++// Routes for the v6.x encyclopedia pages. Their modules were added by Gemini's patches, but the
++// patches' route wiring did not land in app.js, so every one of these links showed "We couldn't
++// find that page". This table maps each #/ref/<slug> and #/explore/<slug> to its page function and
++// turns the three result shapes those modules use into the { env, html, mount, current } that
++// app.js renders:  {html}  ·  {title, body, lede?, trail?}  ·  draws into a container (no result).
++import { html, raw } from "./ui.js";
++import { page } from "./layout.js";
++
++const M = (file, fn, opts = {}) => ({ file, fn, ...opts });
++// opts.args: how to call it.  "qm" = (query, mode) [default]  ·  "c" = (container, mode)  ·  "m" = (mode)  ·  "q" = (query)  ·  "" = ()
++const ROUTES = {
++  "adcs-bispecifics-oligos": M("adcs_bispecifics_oligos", "adcsBispecificsOligosPage"),
++  "adme": M("adme", "admePage"),
++  "amr-antiinfectives": M("amr_antiinfectives", "amrAntiinfectivesPage"),
++  "analytical-usp-q12": M("analytical_usp_q12", "analyticalUspQ12Page", { args: "c" }),
++  "babe-bcs-nti": M("babe_bcs_nti", "babeBcsNtiPage", { args: "c" }),
++  "nonclinical-nams": M("nonclinical_nams", "nonclinicalNamsPage", { args: "c" }),
++  "bd-deals": M("bd_deals", "bdDealsPage"),
++  "biologics": M("biologics_cgt", "biologicsCgtPage"),
++  "atmp": M("biologics_cgt", "biologicsCgtPage"),
++  "careers": M("careers", "careersPage"),
++  "classes": M("atc_classes", "atcClassesPage", { args: "q" }),
++  "combo-products": M("combo_products", "comboProductsPage"),
++  "complex-quality": M("complex_quality", "complexQualityPage"),
++  "continuous-pat-ai": M("continuous_pat_ai_mfg", "continuousPatAiMfgPage"),
++  "controlled-substances": M("controlled_substances", "controlledSubstancesPage"),
++  "diagnostics": M("diagnostics", "diagnosticsPage"),
++  "cdx": M("diagnostics", "diagnosticsPage"),
++  "digital-health": M("digital_health", "digitalHealthPage"),
++  "economics": M("economics", "economicsPage", { args: "", explore: "economicsExplorePage" }),
++  "software": M("economics", "softwareStackPage", { args: "q" }),
++  "excipients-dmfs-nano": M("excipients_dmfs_nano", "excipientsDmfsNanoPage"),
++  "gcp-bimo-cdisc": M("gcp_bimo_cdisc", "gcpBimoCdiscPage"),
++  "global-reg": M("global_reg_hta", "globalRegHtaPage"),
++  "glossary": M("v61b_reference", "glossaryPage"),
++  "trace": M("v61b_reference", "traceStoryboardsPage"),
++  "ich": M("v61b_reference", "ichMatrixPage", { args: "" }),
++  "history-laws": M("history_laws", "historyLawsPage"),
++  "ip": M("ip_patents", "ipPatentsPage"),
++  "oncology-oce": M("oncology_oce", "oncologyOcePage"),
++  "orphan": M("orphan", "orphanPage"),
++  "origins": M("origins", "originsGalleryPage", { args: "q" }),
++  "otc-compounding": M("otc_compounding", "otcCompoundingPage"),
++  "partners": M("partners", "partnersPage", { args: "q", explore: "partnersExplorePage" }),
++  "pathways": M("pathways", "pathwaysPage", { args: "m" }),
++  "pfdd-coa-expanded-access": M("pfdd_coa_expanded_access", "pfddCoaExpandedAccessPage"),
++  "playbooks": M("playbooks", "playbooksPage", { args: "q", explore: "playbooksExplorePage" }),
++  "pricing-access": M("pricing_access", "pricingAccessPage"),
++  "promotion-transparency": M("promotion_transparency", "promotionTransparencyPage"),
++  "radiopharma": M("radiopharma", "radiopharmaPage"),
++  "rmat-hctp-cgt-cmc": M("rmat_hctp_cgt_cmc", "rmatHctpCgtCmcPage"),
++  "rwe": M("rwe", "rwePage"),
++  "safety": M("safety", "safetyPage"),
++  "search": M("global_search", "globalSearchPage"),
++  "shortages-resilience": M("shortages_resilience", "shortagesResiliencePage"),
++  "special-populations": M("special_populations", "specialPopulationsPage"),
++  "sterile": M("sterile_mfg", "sterileMfgPage"),
++  "sterile-mfg": M("sterile_mfg", "sterileMfgPage"),
++  "supply-chain": M("supply_chain", "supplyChainPage"),
++  "trials": M("trials", "trialsPage"),
++  "vaccines": M("vaccines", "vaccinesPage"),
++  "worksheets": M("worksheets", "worksheetsPage", { args: "q" }),
++};
++
++export const v6Slugs = Object.keys(ROUTES);
++
++function shape(r, env, current) {
++  if (r && r.html != null) return { env, current, ...r, env: r.env && r.env !== "start" ? r.env : env, html: raw(String(r.html)) };
++  if (r && r.body != null) {
++    const body = raw(String(r.body));
++    // most of these modules write their own <h1>; only add page() heading when they did not
++    const inner = /<h1[\s>]/.test(String(r.body))
++      ? html`<article class="page level-page">${body}</article>`
++      : page({ trail: r.trail || [], title: r.title || "Pill by Pill", lede: r.lede, body });
++    return { env, current, html: inner, mount: r.mount };
++  }
++  if (typeof r === "string" || r instanceof Object) return { env, current, html: raw(String(r)) };
++  return null;
++}
++
++/** Returns a view for #/<env>/<slug>, or null when the slug is not one of these pages. */
++export async function v6Route(env, slug, query) {
++  const def = ROUTES[slug];
++  if (!def) return null;
++  const mod = await import(`./${def.file}.js`);
++  const current = `#/${env}/${slug}`;
++  const fnName = env === "explore" && def.explore ? def.explore : def.fn;
++  const fn = mod[fnName];
++  if (typeof fn !== "function") throw new Error(`${def.file}.js has no ${fnName}()`);
++  const args = env === "explore" && def.explore ? "" : (def.args ?? "qm");
++  if (args === "c") {
++    return { env, current, html: html`<article class="page level-page" id="v6-mount"><p class="muted">Loading…</p></article>`,
++      mount(root) { const el = root.querySelector("#v6-mount"); fn(el, env).catch((e) => { el.innerHTML = ""; el.append(String(e.message || e)); }); } };
++  }
++  const call = { qm: () => fn(query, env), q: () => fn(query), m: () => fn(env), "": () => fn() }[args];
++  const view = shape(await call(), env, current);
++  if (!view) throw new Error(`${fnName}() returned nothing`);
++  return view;
++}
+diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml
+index feca37f..1af1de0 100644
+--- a/.github/workflows/deploy.yml
++++ b/.github/workflows/deploy.yml
+@@ -77,75 +77,20 @@ jobs:
+                   sys.exit(1)
+           EOF
+           unzip -q /tmp/pill-by-pill-v6.2.zip -d /tmp/build
+-          python3 - << 'EOF'
+-          import pathlib, re
+-
+-          site = pathlib.Path("/tmp/build/site")
+-          base = "/pill-by-pill"
+-          shim = (
+-              '<script>(function(){const b="/pill-by-pill";const f=window.fetch;'
+-              'window.fetch=function(u,o){if(typeof u==="string"&&u.startsWith("/")'
+-              '&&!u.startsWith("//")&&!u.startsWith(b+"/"))u=b+u;return f.call(this,u,o);};})();</script>'
+-          )
+-
+-          # Map actual .js filenames in site/ so any import path pointing elsewhere resolves
+-          js_map = {}
+-          for js_file in site.rglob("*.js"):
+-              rel_web = "/" + js_file.relative_to(site).as_posix()
+-              js_map.setdefault(js_file.name, rel_web)
+-
+-          def rewrite_js(txt):
+-              def fix_import(m):
+-                  prefix, quote, path_val = m.group(1), m.group(2), m.group(3)
+-                  target = site / path_val.lstrip("/")
+-                  if not target.is_file():
+-                      fname = pathlib.PurePosixPath(path_val).name
+-                      if fname in js_map:
+-                          path_val = js_map[fname]
+-                  if path_val.startswith("/") and not path_val.startswith("//") and not path_val.startswith(base + "/"):
+-                      path_val = base + path_val
+-                  return f"{prefix}{quote}{path_val}"
+-
+-              txt = re.sub(r'(\bfrom\s+|\bimport\s*\(\s*)(["\'`])(/[^"\'`]+)', fix_import, txt)
+-              txt = re.sub(r'(fetch\(\s*|location\.href\s*=\s*|href\s*[:=]\s*|src\s*[:=]\s*|url\s*[:=]\s*)(["\'`])/(?!(/|pill-by-pill/))', rf'\1\2{base}/', txt)
+-              return txt
+ 
+-          # Fix stray top-level `if (path === ...) return ...;` appended after route(); in app.js
+-          for app_js in site.rglob("app.js"):
+-              txt = app_js.read_text(encoding="utf-8", errors="ignore")
+-              m = re.search(r'(addEventListener\("hashchange",\s*route\);\s*\n\s*route\(\);)([\s\S]*)$', txt)
+-              if m and "return " in m.group(2):
+-                  stray_lines = [l for l in m.group(2).splitlines() if re.match(r'^\s*if\s*\(path\s*===', l)]
+-                  clean_tail = "\n".join(l for l in m.group(2).splitlines() if not re.match(r'^\s*if\s*\(path\s*===', l))
+-                  txt = txt[:m.start(2)] + clean_tail
+-                  if stray_lines:
+-                      first_route = re.search(r'^\s*if\s*\(path\s*===', txt, flags=re.M)
+-                      if first_route:
+-                          block = "\n".join(stray_lines) + "\n"
+-                          txt = txt[:first_route.start()] + block + txt[first_route.start():]
+-                  app_js.write_text(txt, encoding="utf-8")
+-
+-          for p in site.rglob("*"):
+-              if not p.is_file():
+-                  continue
+-              if p.suffix == ".html":
+-                  txt = p.read_text(encoding="utf-8", errors="ignore")
+-                  txt = re.sub(r'(href|src|action)=(["\'])/(?!(/|pill-by-pill/))', rf'\1=\2{base}/', txt)
+-                  txt = rewrite_js(txt)
+-                  if shim not in txt:
+-                      txt = re.sub(r'(<head[^>]*>)', r'\1' + shim, txt, count=1, flags=re.I)
+-                  p.write_text(txt, encoding="utf-8")
+-              elif p.suffix == ".js":
+-                  txt = p.read_text(encoding="utf-8", errors="ignore")
+-                  p.write_text(rewrite_js(txt), encoding="utf-8")
+-              elif p.suffix == ".css":
+-                  txt = p.read_text(encoding="utf-8", errors="ignore")
+-                  txt = re.sub(r'url\((["\']?)/(?!(/|pill-by-pill/))', rf'url(\1{base}/', txt)
+-                  p.write_text(txt, encoding="utf-8")
++      # Make the build work at https://dsolovyo-debug.github.io/pill-by-pill/ (see the script's notes):
++      # medicine catalogue + pages from the last full build, v6.x route wiring, sub-path prefixes.
++      - name: Prepare site for GitHub Pages
++        run: |
++          python3 .github/scripts/prepare_pages.py /tmp/build/site \
++            --base "/${{ github.event.repository.name }}" \
++            --url "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}" \
++            --underlay .github/site-base/2026-11-20_pill-by-pill-site_v5.26.zip
+ 
+-          print("JS files in site:", sorted(js_map.values()))
+-          EOF
+-          touch /tmp/build/site/.nojekyll
++      - name: Check every page loads
++        run: |
++          pip install --quiet playwright==1.48.0 && python3 -m playwright install --with-deps chromium > /dev/null
++          python3 .github/scripts/check_pages.py /tmp/build/site --base "/${{ github.event.repository.name }}"
+ 
+       - name: Upload Pages Artifact
+         uses: actions/upload-pages-artifact@v3
