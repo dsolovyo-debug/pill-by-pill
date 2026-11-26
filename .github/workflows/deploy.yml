@@ -77,75 +77,20 @@ jobs:
                   sys.exit(1)
           EOF
           unzip -q /tmp/pill-by-pill-v6.2.zip -d /tmp/build
-          python3 - << 'EOF'
-          import pathlib, re
 
-          site = pathlib.Path("/tmp/build/site")
-          base = "/pill-by-pill"
-          shim = (
-              '<script>(function(){const b="/pill-by-pill";const f=window.fetch;'
-              'window.fetch=function(u,o){if(typeof u==="string"&&u.startsWith("/")'
-              '&&!u.startsWith("//")&&!u.startsWith(b+"/"))u=b+u;return f.call(this,u,o);};})();</script>'
-          )
+      # Make the build work at https://dsolovyo-debug.github.io/pill-by-pill/ (see the script's notes):
+      # medicine catalogue + pages from the last full build, v6.x route wiring, sub-path prefixes.
+      - name: Prepare site for GitHub Pages
+        run: |
+          python3 .github/scripts/prepare_pages.py /tmp/build/site \
+            --base "/${{ github.event.repository.name }}" \
+            --url "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}" \
+            --underlay .github/site-base/2026-11-20_pill-by-pill-site_v5.26.zip
 
-          # Map actual .js filenames in site/ so any import path pointing elsewhere resolves
-          js_map = {}
-          for js_file in site.rglob("*.js"):
-              rel_web = "/" + js_file.relative_to(site).as_posix()
-              js_map.setdefault(js_file.name, rel_web)
-
-          def rewrite_js(txt):
-              def fix_import(m):
-                  prefix, quote, path_val = m.group(1), m.group(2), m.group(3)
-                  target = site / path_val.lstrip("/")
-                  if not target.is_file():
-                      fname = pathlib.PurePosixPath(path_val).name
-                      if fname in js_map:
-                          path_val = js_map[fname]
-                  if path_val.startswith("/") and not path_val.startswith("//") and not path_val.startswith(base + "/"):
-                      path_val = base + path_val
-                  return f"{prefix}{quote}{path_val}"
-
-              txt = re.sub(r'(\bfrom\s+|\bimport\s*\(\s*)(["\'`])(/[^"\'`]+)', fix_import, txt)
-              txt = re.sub(r'(fetch\(\s*|location\.href\s*=\s*|href\s*[:=]\s*|src\s*[:=]\s*|url\s*[:=]\s*)(["\'`])/(?!(/|pill-by-pill/))', rf'\1\2{base}/', txt)
-              return txt
-
-          # Fix stray top-level `if (path === ...) return ...;` appended after route(); in app.js
-          for app_js in site.rglob("app.js"):
-              txt = app_js.read_text(encoding="utf-8", errors="ignore")
-              m = re.search(r'(addEventListener\("hashchange",\s*route\);\s*\n\s*route\(\);)([\s\S]*)$', txt)
-              if m and "return " in m.group(2):
-                  stray_lines = [l for l in m.group(2).splitlines() if re.match(r'^\s*if\s*\(path\s*===', l)]
-                  clean_tail = "\n".join(l for l in m.group(2).splitlines() if not re.match(r'^\s*if\s*\(path\s*===', l))
-                  txt = txt[:m.start(2)] + clean_tail
-                  if stray_lines:
-                      first_route = re.search(r'^\s*if\s*\(path\s*===', txt, flags=re.M)
-                      if first_route:
-                          block = "\n".join(stray_lines) + "\n"
-                          txt = txt[:first_route.start()] + block + txt[first_route.start():]
-                  app_js.write_text(txt, encoding="utf-8")
-
-          for p in site.rglob("*"):
-              if not p.is_file():
-                  continue
-              if p.suffix == ".html":
-                  txt = p.read_text(encoding="utf-8", errors="ignore")
-                  txt = re.sub(r'(href|src|action)=(["\'])/(?!(/|pill-by-pill/))', rf'\1=\2{base}/', txt)
-                  txt = rewrite_js(txt)
-                  if shim not in txt:
-                      txt = re.sub(r'(<head[^>]*>)', r'\1' + shim, txt, count=1, flags=re.I)
-                  p.write_text(txt, encoding="utf-8")
-              elif p.suffix == ".js":
-                  txt = p.read_text(encoding="utf-8", errors="ignore")
-                  p.write_text(rewrite_js(txt), encoding="utf-8")
-              elif p.suffix == ".css":
-                  txt = p.read_text(encoding="utf-8", errors="ignore")
-                  txt = re.sub(r'url\((["\']?)/(?!(/|pill-by-pill/))', rf'url(\1{base}/', txt)
-                  p.write_text(txt, encoding="utf-8")
-
-          print("JS files in site:", sorted(js_map.values()))
-          EOF
-          touch /tmp/build/site/.nojekyll
+      - name: Check every page loads
+        run: |
+          pip install --quiet playwright==1.48.0 && python3 -m playwright install --with-deps chromium > /dev/null
+          python3 .github/scripts/check_pages.py /tmp/build/site --base "/${{ github.event.repository.name }}"
 
       - name: Upload Pages Artifact
         uses: actions/upload-pages-artifact@v3
