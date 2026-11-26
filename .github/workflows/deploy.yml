@@ -88,8 +88,25 @@ jobs:
               '&&!u.startsWith("//")&&!u.startsWith(b+"/"))u=b+u;return f.call(this,u,o);};})();</script>'
           )
 
+          # Map actual .js filenames in site/ so any import path pointing elsewhere resolves
+          js_map = {}
+          for js_file in site.rglob("*.js"):
+              rel_web = "/" + js_file.relative_to(site).as_posix()
+              js_map.setdefault(js_file.name, rel_web)
+
           def rewrite_js(txt):
-              txt = re.sub(r'(\bfrom\s+|\bimport\s*\(\s*)(["\'`])/(?!(/|pill-by-pill/))', rf'\1\2{base}/', txt)
+              def fix_import(m):
+                  prefix, quote, path_val = m.group(1), m.group(2), m.group(3)
+                  target = site / path_val.lstrip("/")
+                  if not target.is_file():
+                      fname = pathlib.PurePosixPath(path_val).name
+                      if fname in js_map:
+                          path_val = js_map[fname]
+                  if path_val.startswith("/") and not path_val.startswith("//") and not path_val.startswith(base + "/"):
+                      path_val = base + path_val
+                  return f"{prefix}{quote}{path_val}"
+
+              txt = re.sub(r'(\bfrom\s+|\bimport\s*\(\s*)(["\'`])(/[^"\'`]+)', fix_import, txt)
               txt = re.sub(r'(fetch\(\s*|location\.href\s*=\s*|href\s*[:=]\s*|src\s*[:=]\s*|url\s*[:=]\s*)(["\'`])/(?!(/|pill-by-pill/))', rf'\1\2{base}/', txt)
               return txt
 
@@ -125,6 +142,8 @@ jobs:
                   txt = p.read_text(encoding="utf-8", errors="ignore")
                   txt = re.sub(r'url\((["\']?)/(?!(/|pill-by-pill/))', rf'url(\1{base}/', txt)
                   p.write_text(txt, encoding="utf-8")
+
+          print("JS files in site:", sorted(js_map.values()))
           EOF
           touch /tmp/build/site/.nojekyll
 
