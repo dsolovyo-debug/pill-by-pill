@@ -93,6 +93,21 @@ jobs:
               txt = re.sub(r'(fetch\(\s*|location\.href\s*=\s*|href\s*[:=]\s*|src\s*[:=]\s*|url\s*[:=]\s*)(["\'`])/(?!(/|pill-by-pill/))', rf'\1\2{base}/', txt)
               return txt
 
+          # Fix stray top-level `if (path === ...) return ...;` appended after route(); in app.js
+          for app_js in site.rglob("app.js"):
+              txt = app_js.read_text(encoding="utf-8", errors="ignore")
+              m = re.search(r'(addEventListener\("hashchange",\s*route\);\s*\n\s*route\(\);)([\s\S]*)$', txt)
+              if m and "return " in m.group(2):
+                  stray_lines = [l for l in m.group(2).splitlines() if re.match(r'^\s*if\s*\(path\s*===', l)]
+                  clean_tail = "\n".join(l for l in m.group(2).splitlines() if not re.match(r'^\s*if\s*\(path\s*===', l))
+                  txt = txt[:m.start(2)] + clean_tail
+                  if stray_lines:
+                      first_route = re.search(r'^\s*if\s*\(path\s*===', txt, flags=re.M)
+                      if first_route:
+                          block = "\n".join(stray_lines) + "\n"
+                          txt = txt[:first_route.start()] + block + txt[first_route.start():]
+                  app_js.write_text(txt, encoding="utf-8")
+
           for p in site.rglob("*"):
               if not p.is_file():
                   continue
