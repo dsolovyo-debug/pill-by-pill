@@ -1,0 +1,34 @@
+--- a/.github/scripts/prepare_pages.py
++++ b/.github/scripts/prepare_pages.py
+@@ -111,6 +111,15 @@
+             shutil.copyfile(f, dst)
+     app = site / "js" / "app.js"
+     txt = app.read_text(encoding="utf-8")
++    # 0. Route lines a patch put at the top level of app.js, before or after the closing route(); call
++    #    (v6.2s-x patches, and the v56+ integrators move them in front of route();). A top-level `return`
++    #    is a syntax error that stops the whole site, and `path`/`view` do not exist there anyway; those
++    #    pages are routed by site-fixes/js/v6_routes.js instead.
++    stray = re.compile(r'^[ \t]*if \(path === "/(?:ref|explore)/[^"]+"\) return [^;\n]+;[ \t]*\n', re.M)
++    n_stray = len(stray.findall(txt))
++    if n_stray:
++        txt = stray.sub("", txt)
++        print("app.js: removed", n_stray, "top-level route lines (routed by v6_routes.js)")
+     # 1. Lines a patch appended after the final route(); call. A top-level `return` is a syntax error
+     #    ("Illegal return statement") that stops the whole site from starting.
+     m = re.search(r'addEventListener\("hashchange",\s*route\);\s*\n\s*route\(\);', txt)
+--- a/.github/site-fixes/js/v6_routes.js
++++ b/.github/site-fixes/js/v6_routes.js
+@@ -60,6 +60,13 @@
+   "trials": M("trials", "trialsPage"),
+   "vaccines": M("vaccines", "vaccinesPage"),
+   "worksheets": M("worksheets", "worksheetsPage", { args: "q" }),
++  // v6.2s-x (2026-11-25/26): these six draw into a container, so args "c"
++  "discovery-sbdd-protacs": M("discovery_sbdd_protacs", "discoverySbddProtacsPage", { args: "c" }),
++  "packaging-el-dscsa": M("packaging_el_dscsa", "packagingElDscsaPage", { args: "c" }),
++  "user-fees-prv": M("user_fees_prv", "userFeesPrvPage", { args: "c" }),
++  "pv-faers-sentinel": M("pv_faers_sentinel", "pvFaersSentinelPage", { args: "c" }),
++  "microbiology-sterility": M("microbiology_sterility", "microbiologySterilityPage", { args: "c" }),
++  "dmepa-med-errors": M("dmepa_med_errors", "dmepaMedErrorsPage", { args: "c" }),
+ };
+ 
+ export const v6Slugs = Object.keys(ROUTES);
