@@ -124,6 +124,15 @@ def apply_site_fixes(site: pathlib.Path) -> None:
         lay.write_text('import { refNav } from "./ref_nav.js";\n' + ltxt, encoding="utf-8")
     app = site / "js" / "app.js"
     txt = app.read_text(encoding="utf-8")
+    # 0. Route lines a patch put at the top level of app.js, before or after the closing route(); call
+    #    (v6.2s-x patches, and the v56+ integrators move them in front of route();). A top-level `return`
+    #    is a syntax error that stops the whole site, and `path`/`view` do not exist there anyway; those
+    #    pages are routed by site-fixes/js/v6_routes.js instead.
+    stray = re.compile(r'^[ \t]*if \(path === "/(?:ref|explore)/[^"]+"\) return [^;\n]+;[ \t]*\n', re.M)
+    n_stray = len(stray.findall(txt))
+    if n_stray:
+        txt = stray.sub("", txt)
+        print("app.js: removed", n_stray, "top-level route lines (routed by v6_routes.js)")
     # 1. Lines a patch appended after the final route(); call. A top-level `return` is a syntax error
     #    ("Illegal return statement") that stops the whole site from starting.
     m = re.search(r'addEventListener\("hashchange",\s*route\);\s*\n\s*route\(\);', txt)

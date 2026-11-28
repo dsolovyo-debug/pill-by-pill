@@ -60,6 +60,16 @@ const ROUTES = {
   "trials": M("trials", "trialsPage"),
   "vaccines": M("vaccines", "vaccinesPage"),
   "worksheets": M("worksheets", "worksheetsPage", { args: "q" }),
+  // v6.2p-x (2026-11-24/26, v54+ integrators): these draw into a container, so args "c"
+  "midd-pharmacometrics": M("midd_pharmacometrics", "middPharmacometricsPage", { args: "c" }),
+  "labeling-spl-rems": M("labeling_spl_rems", "labelingSplRemsPage", { args: "c" }),
+  "inspections-483-recalls": M("inspections_483_recalls", "inspections483RecallsPage", { args: "c" }),
+  "discovery-sbdd-protacs": M("discovery_sbdd_protacs", "discoverySbddProtacsPage", { args: "c" }),
+  "packaging-el-dscsa": M("packaging_el_dscsa", "packagingElDscsaPage", { args: "c" }),
+  "user-fees-prv": M("user_fees_prv", "userFeesPrvPage", { args: "c" }),
+  "pv-faers-sentinel": M("pv_faers_sentinel", "pvFaersSentinelPage", { args: "c" }),
+  "microbiology-sterility": M("microbiology_sterility", "microbiologySterilityPage", { args: "c" }),
+  "dmepa-med-errors": M("dmepa_med_errors", "dmepaMedErrorsPage", { args: "c" }),
 };
 
 export const v6Slugs = Object.keys(ROUTES);

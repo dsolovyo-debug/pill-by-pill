@@ -7,13 +7,13 @@ import { html } from "./ui.js";
 const GROUPS = [
   ["Medicines", ["#/ref/search", "#/ref", "#/ref/drugs", "#/ref/families", "#/ref/compare", "#/ref/topics", "#/ref/routes", "#/ref/trace"]],
   ["Clinical & safety", ["#/ref/trials", "#/ref/safety", "#/ref/diagnostics", "#/ref/rwe", "#/ref/special-populations", "#/ref/controlled-substances",
-    "#/ref/orphan", "#/ref/oncology-oce", "#/ref/pfdd-coa-expanded-access", "#/ref/babe-bcs-nti"]],
+    "#/ref/orphan", "#/ref/oncology-oce", "#/ref/pfdd-coa-expanded-access", "#/ref/babe-bcs-nti", "#/ref/pv-faers-sentinel", "#/ref/dmepa-med-errors"]],
   ["Science & modalities", ["#/ref/adme", "#/ref/playbooks", "#/ref/biologics", "#/ref/vaccines", "#/ref/adcs-bispecifics-oligos", "#/ref/rmat-hctp-cgt-cmc",
-    "#/ref/radiopharma", "#/ref/nonclinical-nams", "#/ref/amr-antiinfectives", "#/ref/digital-health"]],
+    "#/ref/radiopharma", "#/ref/nonclinical-nams", "#/ref/amr-antiinfectives", "#/ref/digital-health", "#/ref/discovery-sbdd-protacs", "#/ref/midd-pharmacometrics"]],
   ["Manufacturing & quality", ["#/ref/departments", "#/ref/sterile", "#/ref/continuous-pat-ai", "#/ref/analytical-usp-q12", "#/ref/complex-quality",
-    "#/ref/excipients-dmfs-nano", "#/ref/combo-products", "#/ref/supply-chain", "#/ref/shortages-resilience", "#/ref/vendors", "#/ref/equipment", "#/ref/software"]],
+    "#/ref/excipients-dmfs-nano", "#/ref/combo-products", "#/ref/supply-chain", "#/ref/shortages-resilience", "#/ref/packaging-el-dscsa", "#/ref/microbiology-sterility", "#/ref/inspections-483-recalls", "#/ref/vendors", "#/ref/equipment", "#/ref/software"]],
   ["Regulatory & policy", ["#/ref/pathways", "#/ref/ich", "#/ref/global-reg", "#/ref/gcp-bimo-cdisc", "#/ref/ip", "#/ref/otc-compounding",
-    "#/ref/promotion-transparency", "#/ref/pricing-access", "#/ref/history-laws"]],
+    "#/ref/promotion-transparency", "#/ref/pricing-access", "#/ref/user-fees-prv", "#/ref/labeling-spl-rems", "#/ref/history-laws"]],
   ["Business & careers", ["#/ref/economics", "#/ref/bd-deals", "#/ref/partners", "#/ref/careers"]],
   ["About the data", ["#/ref/glossary", "#/ref/data"]],
 ];
